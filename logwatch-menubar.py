@@ -8,6 +8,7 @@ when matches are detected. Displays recent matches in the menubar dropdown.
 
 import os
 import re
+import sys
 import json
 import threading
 import subprocess
@@ -43,13 +44,33 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 ICON_PATH = SCRIPT_DIR / "log_icon.png"
 
 # Default patterns to match in log files
+# Each pattern is a dict with 'title' (display name) and 'pattern' (match string)
 DEFAULT_ERROR_PATTERNS = [
-    "exception",
-    "error",
-    "traceback",
-    "failed",
-    "critical",
+    {"title": "Exceptions", "pattern": "exception"},
+    {"title": "Errors", "pattern": "error"},
+    {"title": "Tracebacks", "pattern": "traceback"},
+    {"title": "Failures", "pattern": "failed"},
+    {"title": "Critical", "pattern": "critical"},
 ]
+
+
+def normalize_pattern(p):
+    """Convert pattern to normalized dict format.
+
+    Handles migration from old string format to new dict format.
+    """
+    if isinstance(p, str):
+        return {"title": p.capitalize(), "pattern": p}
+    if isinstance(p, dict) and "pattern" in p:
+        if "title" not in p:
+            p["title"] = p["pattern"].capitalize()
+        return p
+    return {"title": str(p), "pattern": str(p)}
+
+
+def normalize_patterns(patterns):
+    """Normalize a list of patterns to dict format."""
+    return [normalize_pattern(p) for p in patterns]
 
 # Default editor configurations: {editor_id: {name, command_template, enabled}}
 # command_template uses {file} and {line} placeholders
@@ -263,30 +284,64 @@ REGEX_HELP = """Common patterns:
   \\d+           - One or more digits"""
 
 
-def show_pattern_editor(title, initial_pattern="", indexed_files=None):
+def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     """Show pattern editor with live preview against sample log lines.
 
     Args:
-        title: Dialog title
-        initial_pattern: Pre-filled pattern text
+        dialog_title: Dialog title
+        initial_pattern: Pre-filled pattern dict with 'title' and 'pattern' keys,
+                        or a string (for backwards compatibility)
         indexed_files: Optional dict of {filepath: {...}} for file selection
 
-    Returns the pattern string or None if cancelled.
+    Returns dict with 'title' and 'pattern' keys, or None if cancelled.
     """
     NSApp.activateIgnoringOtherApps_(True)
 
+    # Normalize initial_pattern to dict format
+    if initial_pattern is None:
+        initial_pattern = {"title": "", "pattern": ""}
+    elif isinstance(initial_pattern, str):
+        initial_pattern = {"title": initial_pattern.capitalize(), "pattern": initial_pattern}
+
     alert = NSAlert.alloc().init()
-    alert.setMessageText_(title)
-    alert.setInformativeText_("Enter pattern (case-insensitive, ^ prefix for regex):")
+    alert.setMessageText_(dialog_title)
+    alert.setInformativeText_("Enter a title and pattern (case-insensitive, ^ prefix for regex):")
     alert.addButtonWithTitle_("OK")
     alert.addButtonWithTitle_("Cancel")
 
-    # Create container view (taller to accommodate file selector)
-    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 220))
+    # Create container view (taller to accommodate title field and file selector)
+    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 250))
+
+    # Title label
+    title_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 222, 50, 20))
+    title_label.setStringValue_("Title:")
+    title_label.setBezeled_(False)
+    title_label.setDrawsBackground_(False)
+    title_label.setEditable_(False)
+    title_label.setSelectable_(False)
+    title_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(title_label)
+
+    # Title input field
+    title_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 220, 400, 24))
+    title_field.setStringValue_(initial_pattern.get("title", ""))
+    title_field.setFont_(NSFont.systemFontOfSize_(12))
+    title_field.setPlaceholderString_("e.g., Database Errors, Auth Failures")
+    container.addSubview_(title_field)
+
+    # Pattern label
+    pattern_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 192, 50, 20))
+    pattern_label.setStringValue_("Pattern:")
+    pattern_label.setBezeled_(False)
+    pattern_label.setDrawsBackground_(False)
+    pattern_label.setEditable_(False)
+    pattern_label.setSelectable_(False)
+    pattern_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(pattern_label)
 
     # Pattern input field (single line)
-    pattern_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 190, 450, 24))
-    pattern_field.setStringValue_(initial_pattern if initial_pattern else "")
+    pattern_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 190, 400, 24))
+    pattern_field.setStringValue_(initial_pattern.get("pattern", ""))
     pattern_field.setFont_(NSFont.systemFontOfSize_(12))
     pattern_field.setPlaceholderString_("e.g., error, ^WARN.*, failed")
     container.addSubview_(pattern_field)
@@ -474,7 +529,13 @@ def show_pattern_editor(title, initial_pattern="", indexed_files=None):
     stop_timer.set()
 
     if response == 1000:  # OK
-        return pattern_field.stringValue().strip()
+        pattern_str = pattern_field.stringValue().strip()
+        title_str = title_field.stringValue().strip()
+        if pattern_str:  # Pattern is required, title is optional
+            # If no title provided, use the pattern as title
+            if not title_str:
+                title_str = pattern_str.capitalize()
+            return {"title": title_str, "pattern": pattern_str}
     return None
 
 
@@ -673,11 +734,24 @@ class MultiLogWatcher:
         self.end_datetime = end_dt
 
     def set_error_patterns(self, patterns):
-        """Set the error patterns to match against."""
-        self.error_patterns = [
-            re.compile(re.escape(p) if not p.startswith("^") else p, re.IGNORECASE)
-            for p in patterns
-        ]
+        """Set the error patterns to match against.
+
+        Args:
+            patterns: List of pattern dicts with 'pattern' key, or strings
+        """
+        self.error_patterns = []
+        for p in patterns:
+            # Handle both dict format and legacy string format
+            if isinstance(p, dict):
+                pattern_str = p.get("pattern", "")
+            else:
+                pattern_str = str(p)
+            if pattern_str:
+                if pattern_str.startswith("^"):
+                    regex = re.compile(pattern_str, re.IGNORECASE)
+                else:
+                    regex = re.compile(re.escape(pattern_str), re.IGNORECASE)
+                self.error_patterns.append(regex)
 
     def set_directories(self, directories):
         """Set directories to watch."""
@@ -763,7 +837,7 @@ class MultiLogWatcher:
             for dir_path in self.watch_dirs:
                 dir_obj = Path(dir_path)
                 if dir_obj.exists():
-                    for log_file in dir_obj.glob("*.log"):
+                    for log_file in dir_obj.glob("**/*.log"):
                         files_to_check.add(str(log_file))
             files_to_check.update(self.watch_files)
 
@@ -828,7 +902,7 @@ class MultiLogWatcher:
             for dir_path in self.watch_dirs:
                 dir_obj = Path(dir_path)
                 if dir_obj.exists():
-                    for log_file in dir_obj.glob("*.log"):
+                    for log_file in dir_obj.glob("**/*.log"):
                         files_to_check.add(str(log_file))
             # Add indexed files
             files_to_check.update(self.watch_files)
@@ -965,7 +1039,7 @@ class MultiLogWatcher:
             for dir_path in self.watch_dirs:
                 dir_obj = Path(dir_path)
                 if dir_obj.exists():
-                    for log_file in dir_obj.glob("*.log"):
+                    for log_file in dir_obj.glob("**/*.log"):
                         files_to_check.add(str(log_file))
 
             # Add indexed files
@@ -1197,15 +1271,10 @@ class LogWatchMenuBar(rumps.App):
         ))
 
         # Recent matches section with datetime range
-        if self.recent_errors:
-            # Get oldest and newest timestamps
-            oldest_ts = self.recent_errors[-1][0]  # deque: newest first, oldest last
-            newest_ts = self.recent_errors[0][0]
-            if oldest_ts == newest_ts:
-                time_range = oldest_ts
-            else:
-                time_range = f"{oldest_ts} - {newest_ts}"
-            recent_label = f"Recent Matches ({time_range}):"
+        # Show the start_datetime filter to qualify what "Recent" means
+        if self.start_datetime:
+            start_filter_str = self.start_datetime.strftime("%Y-%m-%d %H:%M")
+            recent_label = f"Recent Matches (since {start_filter_str}):"
         else:
             recent_label = "Recent Matches:"
         self.menu.add(self._menu_item(
@@ -1396,7 +1465,7 @@ class LogWatchMenuBar(rumps.App):
             self.menu.add(idx_menu)
 
         # Match patterns submenu
-        patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS)
+        patterns = normalize_patterns(self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS))
         patterns_menu = self._menu_item(
             f"Match Patterns ({len(patterns)})",
             tooltip="Text patterns that trigger alerts when found in logs"
@@ -1411,11 +1480,14 @@ class LogWatchMenuBar(rumps.App):
                 tooltip="Add a new pattern to match"
             ))
         patterns_menu.add(rumps.separator)
-        for pattern in patterns:
+        for pattern_dict in patterns:
             # Create submenu for each pattern with Edit and Remove options
+            title = pattern_dict.get("title", "")
+            pattern_str = pattern_dict.get("pattern", "")
+            display_title = title[:25] + "..." if len(title) > 25 else title
             pattern_submenu = self._menu_item(
-                pattern[:25] + "..." if len(pattern) > 25 else pattern,
-                tooltip=f"Options for pattern: {pattern}"
+                display_title,
+                tooltip=f"Pattern: {pattern_str}"
             )
             edit_item = self._menu_item(
                 "Edit",
@@ -1426,8 +1498,8 @@ class LogWatchMenuBar(rumps.App):
                 tooltip=f"Delete this pattern"
             )
             if not self.reindexing:
-                edit_item.set_callback(lambda _, p=pattern: self._edit_pattern(p))
-                remove_item.set_callback(lambda _, p=pattern: self._remove_pattern(p))
+                edit_item.set_callback(lambda _, p=pattern_dict: self._edit_pattern(p))
+                remove_item.set_callback(lambda _, p=pattern_dict: self._remove_pattern(p))
             pattern_submenu.add(edit_item)
             pattern_submenu.add(remove_item)
             patterns_menu.add(pattern_submenu)
@@ -1593,22 +1665,30 @@ class LogWatchMenuBar(rumps.App):
         indexed_files = self.index.get("files", {})
         self.watcher.set_indexed_files(list(indexed_files.keys()))
 
-        # Restore saved state and reindex from saved positions
+        # Restore saved state if we have indexed files
         if indexed_files:
             self.watcher.restore_file_state(indexed_files)
-            if reindex:
-                self.reindexing = True
-                self.reindex_progress = 0.0
+
+        # Reindex if requested and we have directories or indexed files
+        directories = self.config.get("directories", [])
+        if reindex and (indexed_files or directories):
+            self.reindexing = True
+            self.reindex_progress = 0.0
+            self._build_menu()
+
+            def do_reindex():
+                if indexed_files:
+                    # Reindex from saved positions for known files
+                    self.watcher.reindex_from_positions(self._on_reindex_progress)
+                else:
+                    # Full reindex to discover files from directories
+                    self.watcher.reindex_all_files(self._on_reindex_progress)
+                self._update_index_from_watcher()
+                self.reindexing = False
                 self._build_menu()
 
-                def do_reindex():
-                    self.watcher.reindex_from_positions(self._on_reindex_progress)
-                    self._update_index_from_watcher()
-                    self.reindexing = False
-                    self._build_menu()
-
-                thread = threading.Thread(target=do_reindex, daemon=True)
-                thread.start()
+            thread = threading.Thread(target=do_reindex, daemon=True)
+            thread.start()
 
         self.watcher.start()
 
@@ -1700,11 +1780,8 @@ class LogWatchMenuBar(rumps.App):
                     directories.append(dir_path)
                     self.config["directories"] = directories
                     self._save_config()
-                    # Restart watcher in background to avoid blocking UI
-                    def restart():
-                        self._start_watcher()
-                        AppHelper.callAfter(self._build_menu)
-                    threading.Thread(target=restart, daemon=True).start()
+                    # Restart watcher and reindex in background
+                    self._reindex_after_directory_change()
 
     def _remove_directory(self, dir_path):
         """Remove a directory from watch list."""
@@ -1713,11 +1790,35 @@ class LogWatchMenuBar(rumps.App):
             directories.remove(dir_path)
             self.config["directories"] = directories
             self._save_config()
-            # Restart watcher in background to avoid blocking UI
-            def restart():
-                self._start_watcher()
-                AppHelper.callAfter(self._build_menu)
-            threading.Thread(target=restart, daemon=True).start()
+            # Also remove indexed files from the removed directory
+            indexed_files = self.index.get("files", {})
+            files_to_remove = [
+                fp for fp in indexed_files.keys()
+                if fp.startswith(dir_path + "/") or fp.startswith(dir_path + os.sep)
+            ]
+            for fp in files_to_remove:
+                del indexed_files[fp]
+            self.index["files"] = indexed_files
+            self._save_index()
+            # Restart watcher and reindex in background
+            self._reindex_after_directory_change()
+
+    def _reindex_after_directory_change(self):
+        """Restart watcher and reindex all files after directory change."""
+        self.reindexing = True
+        self.reindex_progress = 0.0
+        self._build_menu()
+
+        def do_restart_and_reindex():
+            self._start_watcher(reindex=False)
+            if self.watcher:
+                self.watcher.reindex_all_files(self._on_reindex_progress)
+                # Update index with newly discovered files from directories
+                self._update_index_from_watcher()
+            self.reindexing = False
+            AppHelper.callAfter(self._build_menu)
+
+        threading.Thread(target=do_restart_and_reindex, daemon=True).start()
 
     def _start_scan(self, _):
         """Start scanning for log files."""
@@ -2468,38 +2569,54 @@ class LogWatchMenuBar(rumps.App):
     def _add_pattern(self, _):
         """Add a new match pattern."""
         indexed_files = self.index.get("files", {})
-        pattern = show_pattern_editor("Add Match Pattern", indexed_files=indexed_files)
+        new_pattern = show_pattern_editor("Add Match Pattern", indexed_files=indexed_files)
 
-        if pattern:
-            patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
-            if pattern not in patterns:
-                patterns.append(pattern)
+        if new_pattern:
+            patterns = normalize_patterns(
+                self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
+            )
+            # Check if pattern string already exists
+            existing_patterns = [p.get("pattern") for p in patterns]
+            if new_pattern.get("pattern") not in existing_patterns:
+                patterns.append(new_pattern)
                 self.config["error_patterns"] = patterns
                 self._save_config()
                 self._reindex_with_new_patterns()
 
-    def _edit_pattern(self, old_pattern):
+    def _edit_pattern(self, old_pattern_dict):
         """Edit an existing match pattern."""
         indexed_files = self.index.get("files", {})
-        new_pattern = show_pattern_editor("Edit Match Pattern", old_pattern, indexed_files=indexed_files)
+        old_pattern_dict = normalize_pattern(old_pattern_dict)
+        new_pattern = show_pattern_editor(
+            "Edit Match Pattern", old_pattern_dict, indexed_files=indexed_files
+        )
 
-        if new_pattern and new_pattern != old_pattern:
-            patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
-            if old_pattern in patterns:
-                idx = patterns.index(old_pattern)
-                patterns[idx] = new_pattern
-                self.config["error_patterns"] = patterns
-                self._save_config()
-                self._reindex_with_new_patterns()
-
-    def _remove_pattern(self, pattern):
-        """Remove a match pattern."""
-        patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
-        if pattern in patterns:
-            patterns.remove(pattern)
+        if new_pattern and new_pattern != old_pattern_dict:
+            patterns = normalize_patterns(
+                self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
+            )
+            # Find by pattern string
+            old_pattern_str = old_pattern_dict.get("pattern")
+            for i, p in enumerate(patterns):
+                if p.get("pattern") == old_pattern_str:
+                    patterns[i] = new_pattern
+                    break
             self.config["error_patterns"] = patterns
             self._save_config()
             self._reindex_with_new_patterns()
+
+    def _remove_pattern(self, pattern_dict):
+        """Remove a match pattern."""
+        pattern_dict = normalize_pattern(pattern_dict)
+        patterns = normalize_patterns(
+            self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
+        )
+        # Find and remove by pattern string
+        pattern_str = pattern_dict.get("pattern")
+        patterns = [p for p in patterns if p.get("pattern") != pattern_str]
+        self.config["error_patterns"] = patterns
+        self._save_config()
+        self._reindex_with_new_patterns()
 
     def _reindex_with_new_patterns(self):
         """Reindex all files with updated patterns."""
@@ -2537,9 +2654,11 @@ class LogWatchMenuBar(rumps.App):
             self.scanner.stop()
 
         # Launch new instance before quitting
+        # Use sys.executable to ensure we use the same Python interpreter
+        # (including virtual environment) that's currently running
         script_path = Path(__file__).resolve()
         subprocess.Popen(
-            ["python3", str(script_path)],
+            [sys.executable, str(script_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True

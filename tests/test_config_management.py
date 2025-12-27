@@ -13,7 +13,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from logwatch_core import DEFAULT_ERROR_PATTERNS, DATETIME_FORMAT
+from logwatch_core import (
+    DEFAULT_ERROR_PATTERNS,
+    DATETIME_FORMAT,
+    normalize_pattern,
+    normalize_patterns,
+)
 
 # These paths are defined in the main app file but tests only verify path structure
 CONFIG_PATH = Path.home() / ".config" / "logwatch-menubar" / "config.json"
@@ -295,13 +300,69 @@ class TestDefaultPatterns:
     def test_default_patterns_content(self):
         """Test that default patterns include common error terms."""
         expected = ["exception", "error", "traceback", "failed", "critical"]
+        pattern_strings = [p.get("pattern") if isinstance(p, dict) else p
+                          for p in DEFAULT_ERROR_PATTERNS]
         for pattern in expected:
-            assert pattern in DEFAULT_ERROR_PATTERNS
+            assert pattern in pattern_strings
 
     def test_patterns_are_lowercase(self):
         """Test that patterns are lowercase (for case-insensitive matching)."""
         for pattern in DEFAULT_ERROR_PATTERNS:
-            assert pattern == pattern.lower()
+            pattern_str = pattern.get("pattern") if isinstance(pattern, dict) else pattern
+            assert pattern_str == pattern_str.lower()
+
+    def test_patterns_have_titles(self):
+        """Test that default patterns have title and pattern keys."""
+        for pattern in DEFAULT_ERROR_PATTERNS:
+            assert isinstance(pattern, dict)
+            assert "title" in pattern
+            assert "pattern" in pattern
+            assert len(pattern["title"]) > 0
+            assert len(pattern["pattern"]) > 0
+
+
+class TestPatternNormalization:
+    """Tests for pattern normalization functions."""
+
+    def test_normalize_string_pattern(self):
+        """Test normalizing a plain string pattern."""
+        result = normalize_pattern("error")
+        assert result == {"title": "Error", "pattern": "error"}
+
+    def test_normalize_dict_pattern_with_title(self):
+        """Test normalizing a dict pattern that has title."""
+        result = normalize_pattern({"title": "My Errors", "pattern": "error"})
+        assert result == {"title": "My Errors", "pattern": "error"}
+
+    def test_normalize_dict_pattern_without_title(self):
+        """Test normalizing a dict pattern missing title."""
+        result = normalize_pattern({"pattern": "warning"})
+        assert result["title"] == "Warning"
+        assert result["pattern"] == "warning"
+
+    def test_normalize_patterns_list(self):
+        """Test normalizing a list of mixed patterns."""
+        patterns = [
+            "error",
+            {"title": "Critical Issues", "pattern": "critical"},
+            {"pattern": "failed"},
+        ]
+        result = normalize_patterns(patterns)
+        assert len(result) == 3
+        assert result[0] == {"title": "Error", "pattern": "error"}
+        assert result[1] == {"title": "Critical Issues", "pattern": "critical"}
+        assert result[2]["title"] == "Failed"
+        assert result[2]["pattern"] == "failed"
+
+    def test_normalize_empty_list(self):
+        """Test normalizing an empty list."""
+        result = normalize_patterns([])
+        assert result == []
+
+    def test_normalize_preserves_regex_pattern(self):
+        """Test that regex patterns are preserved."""
+        result = normalize_pattern("^ERROR.*timeout")
+        assert result["pattern"] == "^ERROR.*timeout"
 
 
 class TestConfigPaths:

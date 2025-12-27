@@ -14,13 +14,33 @@ from datetime import datetime
 from collections import deque
 
 # Default patterns that indicate an error or exception
+# Each pattern is a dict with 'title' (display name) and 'pattern' (match string)
 DEFAULT_ERROR_PATTERNS = [
-    "exception",
-    "error",
-    "traceback",
-    "failed",
-    "critical",
+    {"title": "Exceptions", "pattern": "exception"},
+    {"title": "Errors", "pattern": "error"},
+    {"title": "Tracebacks", "pattern": "traceback"},
+    {"title": "Failures", "pattern": "failed"},
+    {"title": "Critical", "pattern": "critical"},
 ]
+
+
+def normalize_pattern(p):
+    """Convert pattern to normalized dict format.
+
+    Handles migration from old string format to new dict format.
+    """
+    if isinstance(p, str):
+        return {"title": p.capitalize(), "pattern": p}
+    if isinstance(p, dict) and "pattern" in p:
+        if "title" not in p:
+            p["title"] = p["pattern"].capitalize()
+        return p
+    return {"title": str(p), "pattern": str(p)}
+
+
+def normalize_patterns(patterns):
+    """Normalize a list of patterns to dict format."""
+    return [normalize_pattern(p) for p in patterns]
 
 # Pattern to detect log file format (timestamp at start of line)
 LOG_LINE_PATTERN = re.compile(
@@ -179,7 +199,7 @@ class LogScanner:
             return True
 
         # Check if name contains 'log'
-        if "log" in path.name.lower():
+        if "log" in path.name.lower() or "txt" in path.name.lower():
             # Verify it looks like a text log by checking first few lines
             return self._has_log_format(filepath)
 
@@ -235,11 +255,24 @@ class MultiLogWatcher:
         self.end_datetime = end_dt
 
     def set_error_patterns(self, patterns):
-        """Set the error patterns to match against."""
-        self.error_patterns = [
-            re.compile(re.escape(p) if not p.startswith("^") else p, re.IGNORECASE)
-            for p in patterns
-        ]
+        """Set the error patterns to match against.
+
+        Args:
+            patterns: List of pattern dicts with 'pattern' key, or strings
+        """
+        self.error_patterns = []
+        for p in patterns:
+            # Handle both dict format and legacy string format
+            if isinstance(p, dict):
+                pattern_str = p.get("pattern", "")
+            else:
+                pattern_str = str(p)
+            if pattern_str:
+                if pattern_str.startswith("^"):
+                    regex = re.compile(pattern_str, re.IGNORECASE)
+                else:
+                    regex = re.compile(re.escape(pattern_str), re.IGNORECASE)
+                self.error_patterns.append(regex)
 
     def set_directories(self, directories):
         """Set directories to watch."""

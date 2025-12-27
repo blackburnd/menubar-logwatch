@@ -1,5 +1,8 @@
 # menubar-logwatch
 
+I use this to keep me notified in real time of processes that may be building or being built. 
+I first select a directory to scan, the scan will search for file considered as "log files"
+as well as find similar exception types, processes actively using each file. 
 A macOS menubar application that monitors log files for pattern matches, playing a sound alert when detected. Built with [rumps](https://github.com/jaredks/rumps).
 
 ![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)
@@ -8,9 +11,9 @@ A macOS menubar application that monitors log files for pattern matches, playing
 
 ## Features
 
-- **Menubar status indicators**: `[PID]` (watching), `[PID]!` (match detected), `[PID]?` (not configured)
+- **Menubar status indicator**: Shows "Logwatch" when watching, "Logwatch?" when not configured
 - **Multi-directory monitoring** with filesystem scanning
-- **Configurable match patterns** with live preview editor
+- **Configurable match patterns** with titles and live preview editor
 - **Datetime range filtering** for targeted log analysis
 - **Multiple editor support**: Console, VS Code, Sublime Text, BBEdit, Emacs, TextMate, Vim
 - **Per-file match counting** with matched line tracking
@@ -80,10 +83,14 @@ python logwatch-menubar.py
 ### Managing Match Patterns
 
 1. Go to `Match Patterns (N)`
-2. **Add Pattern...** - Opens pattern editor with live preview
-3. Each pattern has **Edit** and **Remove** options
+2. **Add Pattern...** - Opens pattern editor with title and live preview
+3. Each pattern shows its title in the menu (hover for the actual pattern)
+4. Each pattern has **Edit** and **Remove** options
 
-Patterns are case-insensitive. Prefix with `^` for regex patterns.
+Patterns support:
+- **Title**: A friendly name for easy identification (e.g., "Database Errors")
+- **Pattern**: The actual text to match (case-insensitive)
+- **Regex**: Prefix with `^` for regex patterns (e.g., `^ERROR.*timeout`)
 
 ### Editor Configuration
 
@@ -110,12 +117,20 @@ Configuration is stored at `~/.config/logwatch-menubar/config.json`:
 {
   "directories": ["/path/to/logs"],
   "sound_enabled": true,
-  "error_patterns": ["exception", "error", "traceback", "failed", "critical"],
+  "error_patterns": [
+    {"title": "Exceptions", "pattern": "exception"},
+    {"title": "Errors", "pattern": "error"},
+    {"title": "Tracebacks", "pattern": "traceback"},
+    {"title": "Failures", "pattern": "failed"},
+    {"title": "Critical", "pattern": "critical"}
+  ],
   "editors": {
     "vscode": {"enabled": true, "command": "code --goto {file}:{line}"}
   }
 }
 ```
+
+Note: Legacy string-based patterns (e.g., `"error"`) are automatically migrated to the new format.
 
 Indexed files are stored at `~/.config/logwatch-menubar/log_index.json`.
 
@@ -135,11 +150,13 @@ Recognized timestamp formats:
 
 ## Default Match Patterns
 
-- exception
-- error
-- traceback
-- failed
-- critical
+| Title | Pattern |
+|-------|---------|
+| Exceptions | exception |
+| Errors | error |
+| Tracebacks | traceback |
+| Failures | failed |
+| Critical | critical |
 
 ## Development
 
