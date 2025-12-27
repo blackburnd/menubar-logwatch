@@ -1,0 +1,1 @@
+# menubar-logwatch test suite

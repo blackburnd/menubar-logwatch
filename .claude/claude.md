@@ -1,0 +1,9 @@
+- once you read this file, observe when it is changed to re-process after changes. 
+- menubar-logwatch is built to keep a closer attention to log files in select and changeable directories.
+- menu-logwatch Should show the word 'Logwatch' instead of the pid next to the log icon 
+- the pid should be displayed where the user can use it to manuyally kill the process at will.
+- A description of the functionality of each of the items in the menu dropdown should have mouseover helpful hints about what each thing does in the context. 
+- tests should exist for all functionality, and 80% per python file is expected for code coverage. 
+- No non-ascii characters should be used. 
+- the tests should be runnable by simply using 'pytest ' at teh root of thepackage. 
+
