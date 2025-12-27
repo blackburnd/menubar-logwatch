@@ -6,4 +6,5 @@
 - tests should exist for all functionality, and 80% per python file is expected for code coverage. 
 - No non-ascii characters should be used. 
 - the tests should be runnable by simply using 'pytest ' at teh root of thepackage. 
-
+- The sound selected should never be played more than 5 times for each scan .a
+- QA Agent needs to verify that there is no personal data in the package before suggesting commit messages to the user. 

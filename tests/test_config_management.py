@@ -13,39 +13,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import unittest.mock as mock
+from logwatch_core import DEFAULT_ERROR_PATTERNS, DATETIME_FORMAT
 
-# Mock the macOS-specific imports
-mock_rumps = mock.MagicMock()
-mock_appkit = mock.MagicMock()
-mock_foundation = mock.MagicMock()
-mock_pyobjctools = mock.MagicMock()
-
-with mock.patch.dict('sys.modules', {
-    'rumps': mock_rumps,
-    'AppKit': mock_appkit,
-    'Foundation': mock_foundation,
-    'PyObjCTools': mock_pyobjctools,
-    'PyObjCTools.AppHelper': mock.MagicMock(),
-}):
-    # Read the source and extract just the functions we need
-    source_path = Path(__file__).parent.parent / "logwatch-menubar.py"
-    source_code = open(source_path).read()
-
-    # Create a module namespace to execute code in
-    module_globals = {
-        '__name__': 'logwatch_test',
-        '__file__': str(source_path),
-    }
-
-    # Execute the source
-    exec(source_code, module_globals)
-
-    # Get constants
-    CONFIG_PATH = module_globals['CONFIG_PATH']
-    INDEX_PATH = module_globals['INDEX_PATH']
-    DEFAULT_ERROR_PATTERNS = module_globals['DEFAULT_ERROR_PATTERNS']
-    DATETIME_FORMAT = module_globals['DATETIME_FORMAT']
+# These paths are defined in the main app file but tests only verify path structure
+CONFIG_PATH = Path.home() / ".config" / "logwatch-menubar" / "config.json"
+INDEX_PATH = Path.home() / ".config" / "logwatch-menubar" / "log_index.json"
 
 
 class TestConfigurationLoading:

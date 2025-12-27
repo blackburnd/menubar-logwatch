@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-logwatch-menubar - A macOS menubar app that monitors log files for exceptions.
+logwatch-menubar - A macOS menubar app that monitors log files for pattern matches.
 
-Watches configured log directories for error patterns and plays a sound alert
-when exceptions are detected. Displays recent errors in the menubar dropdown.
+Watches configured log directories for match patterns and plays a sound alert
+when matches are detected. Displays recent matches in the menubar dropdown.
 """
 
 import os
@@ -26,7 +26,9 @@ from AppKit import (
     NSStackView, NSUserInterfaceLayoutOrientationVertical,
     NSObject, NSScrollView, NSTableView, NSTableColumn,
     NSBezelBorder, NSTableViewSelectionHighlightStyleRegular,
-    NSMenu
+    NSMenu, NSColor, NSTextView, NSAttributedString, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSBackgroundColorAttributeName,
+    NSMutableAttributedString, NSPopUpButton
 )
 from PyObjCTools import AppHelper
 import objc
@@ -40,7 +42,7 @@ MAX_RECENT_ERRORS = 10
 SCRIPT_DIR = Path(__file__).parent.resolve()
 ICON_PATH = SCRIPT_DIR / "log_icon.png"
 
-# Default patterns that indicate an error or exception
+# Default patterns to match in log files
 DEFAULT_ERROR_PATTERNS = [
     "exception",
     "error",
@@ -48,6 +50,54 @@ DEFAULT_ERROR_PATTERNS = [
     "failed",
     "critical",
 ]
+
+# Default editor configurations: {editor_id: {name, command_template, enabled}}
+# command_template uses {file} and {line} placeholders
+DEFAULT_EDITORS = {
+    "console": {
+        "name": "Console",
+        "command": "open -a Console {file}",
+        "enabled": True,
+        "supports_line": False,
+    },
+    "vscode": {
+        "name": "VS Code",
+        "command": "code --goto {file}:{line}",
+        "enabled": True,
+        "supports_line": True,
+    },
+    "sublime": {
+        "name": "Sublime Text",
+        "command": "subl {file}:{line}",
+        "enabled": True,
+        "supports_line": True,
+    },
+    "bbedit": {
+        "name": "BBEdit",
+        "command": "bbedit +{line} {file}",
+        "enabled": True,
+        "supports_line": True,
+    },
+    "emacs": {
+        "name": "Emacs",
+        "command": "emacsclient -n +{line} {file}",
+        "enabled": True,
+        "supports_line": True,
+    },
+    "textmate": {
+        "name": "TextMate",
+        "command": "mate -l {line} {file}",
+        "enabled": True,
+        "supports_line": True,
+    },
+    "vim": {
+        "name": "Vim (Terminal)",
+        "command": "vim +{line} {file}",
+        "enabled": True,
+        "supports_line": True,
+        "use_terminal": True,
+    },
+}
 
 # Pattern to detect log file format (timestamp at start of line)
 LOG_LINE_PATTERN = re.compile(
@@ -131,7 +181,13 @@ def nsdate_to_datetime(nsdate):
 
 
 def show_datetime_picker(title, message, initial_datetime=None):
-    """Show a native macOS date/time picker dialog with graphical calendar. Returns datetime or None."""
+    """Show a native macOS date/time picker dialog with graphical calendar.
+
+    Returns:
+        datetime if OK clicked
+        None if Cancel clicked
+        'clear' if Clear clicked
+    """
     # Bring app to front so dialog appears above other windows
     NSApp.activateIgnoringOtherApps_(True)
 
@@ -139,6 +195,7 @@ def show_datetime_picker(title, message, initial_datetime=None):
     alert.setMessageText_(title)
     alert.setInformativeText_(message)
     alert.addButtonWithTitle_("OK")
+    alert.addButtonWithTitle_("Clear")
     alert.addButtonWithTitle_("Cancel")
 
     # Create container view for the calendar and time picker
@@ -170,11 +227,11 @@ def show_datetime_picker(title, message, initial_datetime=None):
     # Make the alert window float above all others
     alert.window().setLevel_(3)  # NSFloatingWindowLevel
 
-    # Run the dialog - NSAlertFirstButtonReturn (1000) is returned for OK
+    # Run the dialog
+    # Button responses: OK=1000, Clear=1001, Cancel=1002
     response = alert.runModal()
 
-    # NSAlertFirstButtonReturn = 1000 for the first button (OK)
-    if response == 1000:
+    if response == 1000:  # OK
         # Combine date from calendar and time from time picker
         cal_date = nsdate_to_datetime(calendar_picker.dateValue())
         time_date = nsdate_to_datetime(time_picker.dateValue())
@@ -183,6 +240,241 @@ def show_datetime_picker(title, message, initial_datetime=None):
             time_date.hour, time_date.minute, time_date.second
         )
         return combined
+    elif response == 1001:  # Clear
+        return 'clear'
+    return None  # Cancel
+
+
+# Sample log lines for pattern testing (Lorem ipsum split into 5 parts)
+SAMPLE_LOG_LINES = [
+    "2024-01-15 10:00:01 INFO Lorem ipsum dolor sit amet consectetur adipiscing elit",
+    "2024-01-15 10:00:02 ERROR Sed do eiusmod tempor incididunt ut labore et dolore",
+    "2024-01-15 10:00:03 WARN Ut enim ad minim veniam quis nostrud exercitation",
+    "2024-01-15 10:00:04 DEBUG Duis aute irure dolor in reprehenderit in voluptate",
+    "2024-01-15 10:00:05 CRITICAL Excepteur sint occaecat cupidatat non proident sunt",
+]
+
+# Common regex patterns for tooltip help
+REGEX_HELP = """Common patterns:
+  error|warn     - Match 'error' OR 'warn'
+  ^ERROR         - Line starts with ERROR (regex)
+  ^\\[ERROR\\]   - Match literal [ERROR]
+  failed.*conn   - 'failed' followed by 'conn'
+  \\d+           - One or more digits"""
+
+
+def show_pattern_editor(title, initial_pattern="", indexed_files=None):
+    """Show pattern editor with live preview against sample log lines.
+
+    Args:
+        title: Dialog title
+        initial_pattern: Pre-filled pattern text
+        indexed_files: Optional dict of {filepath: {...}} for file selection
+
+    Returns the pattern string or None if cancelled.
+    """
+    NSApp.activateIgnoringOtherApps_(True)
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.setInformativeText_("Enter pattern (case-insensitive, ^ prefix for regex):")
+    alert.addButtonWithTitle_("OK")
+    alert.addButtonWithTitle_("Cancel")
+
+    # Create container view (taller to accommodate file selector)
+    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 220))
+
+    # Pattern input field (single line)
+    pattern_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 190, 450, 24))
+    pattern_field.setStringValue_(initial_pattern if initial_pattern else "")
+    pattern_field.setFont_(NSFont.systemFontOfSize_(12))
+    pattern_field.setPlaceholderString_("e.g., error, ^WARN.*, failed")
+    container.addSubview_(pattern_field)
+
+    # File selector row
+    file_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 162, 80, 20))
+    file_label.setStringValue_("Test with:")
+    file_label.setBezeled_(False)
+    file_label.setDrawsBackground_(False)
+    file_label.setEditable_(False)
+    file_label.setSelectable_(False)
+    file_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(file_label)
+
+    # File selector popup
+    file_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(80, 160, 370, 24))
+    file_popup.addItemWithTitle_("Sample lines (Lorem ipsum)")
+
+    # Build list of indexed files
+    file_paths = []
+    if indexed_files:
+        for filepath in sorted(indexed_files.keys()):
+            filename = Path(filepath).name
+            file_popup.addItemWithTitle_(filename)
+            file_paths.append(filepath)
+
+    container.addSubview_(file_popup)
+
+    # Preview label
+    preview_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 135, 450, 18))
+    preview_label.setStringValue_("Preview (matching lines highlighted):")
+    preview_label.setBezeled_(False)
+    preview_label.setDrawsBackground_(False)
+    preview_label.setEditable_(False)
+    preview_label.setSelectable_(False)
+    preview_label.setFont_(NSFont.systemFontOfSize_(10))
+    container.addSubview_(preview_label)
+
+    # Sample lines display (small font, read-only)
+    sample_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 130))
+    sample_view.setFont_(NSFont.userFixedPitchFontOfSize_(9))
+    sample_view.setEditable_(False)
+    sample_view.setSelectable_(True)
+    sample_view.setBackgroundColor_(NSColor.textBackgroundColor())
+
+    container.addSubview_(sample_view)
+
+    alert.setAccessoryView_(container)
+    alert.window().setLevel_(3)  # Float above others
+
+    # Store references and current sample lines for the update function
+    state = {
+        'pattern_field': pattern_field,
+        'sample_view': sample_view,
+        'file_popup': file_popup,
+        'file_paths': file_paths,
+        'current_lines': SAMPLE_LOG_LINES[:],
+        'last_file_index': 0
+    }
+
+    def load_file_lines(filepath, max_lines=20):
+        """Load sample lines from a file."""
+        lines = []
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f):
+                    if i >= max_lines:
+                        break
+                    stripped = line.rstrip("\n\r")
+                    if stripped:  # Skip empty lines
+                        lines.append(stripped[:100])  # Truncate long lines
+        except Exception:
+            lines = ["(Could not read file)"]
+        return lines if lines else ["(File is empty)"]
+
+    def update_preview():
+        """Update the preview with highlighted matches."""
+        # Check if file selection changed
+        current_file_index = state['file_popup'].indexOfSelectedItem()
+        if current_file_index != state['last_file_index']:
+            state['last_file_index'] = current_file_index
+            if current_file_index == 0:
+                # Sample lines
+                state['current_lines'] = SAMPLE_LOG_LINES[:]
+            else:
+                # Load from indexed file
+                filepath = state['file_paths'][current_file_index - 1]
+                state['current_lines'] = load_file_lines(filepath)
+
+        pattern_text = state['pattern_field'].stringValue().strip()
+        current_lines = state['current_lines']
+
+        # Create attributed string for the sample view
+        attr_string = NSMutableAttributedString.alloc().initWithString_("")
+
+        small_font = NSFont.userFixedPitchFontOfSize_(9)
+        normal_attrs = {
+            NSFontAttributeName: small_font,
+            NSForegroundColorAttributeName: NSColor.textColor()
+        }
+        match_attrs = {
+            NSFontAttributeName: small_font,
+            NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSBackgroundColorAttributeName: NSColor.systemRedColor()
+        }
+
+        if pattern_text:
+            try:
+                # Compile pattern like MultiLogWatcher does
+                if pattern_text.startswith("^"):
+                    regex = re.compile(pattern_text, re.IGNORECASE)
+                else:
+                    regex = re.compile(re.escape(pattern_text), re.IGNORECASE)
+
+                for i, line in enumerate(current_lines):
+                    if i > 0:
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_("\n", normal_attrs)
+                        )
+
+                    # Check if line matches
+                    if regex.search(line):
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_(line, match_attrs)
+                        )
+                    else:
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_(line, normal_attrs)
+                        )
+            except re.error:
+                # Invalid regex - show all lines normally
+                for i, line in enumerate(current_lines):
+                    if i > 0:
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_("\n", normal_attrs)
+                        )
+                    attr_string.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(line, normal_attrs)
+                    )
+        else:
+            # No pattern - show all lines normally
+            for i, line in enumerate(current_lines):
+                if i > 0:
+                    attr_string.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_("\n", normal_attrs)
+                    )
+                attr_string.appendAttributedString_(
+                    NSAttributedString.alloc().initWithString_attributes_(line, normal_attrs)
+                )
+
+        state['sample_view'].textStorage().setAttributedString_(attr_string)
+
+    # Set up timer to update preview periodically while dialog is open
+    import threading
+    stop_timer = threading.Event()
+
+    def timer_loop():
+        last_pattern = ""
+        last_file_idx = 0
+        while not stop_timer.is_set():
+            try:
+                current_pattern = state['pattern_field'].stringValue()
+                current_file_idx = state['file_popup'].indexOfSelectedItem()
+                if current_pattern != last_pattern or current_file_idx != last_file_idx:
+                    last_pattern = current_pattern
+                    last_file_idx = current_file_idx
+                    AppHelper.callAfter(update_preview)
+            except Exception:
+                pass
+            stop_timer.wait(0.2)
+
+    timer_thread = threading.Thread(target=timer_loop, daemon=True)
+    timer_thread.start()
+
+    # Initial preview update
+    update_preview()
+
+    # Add tooltip with regex help
+    pattern_field.setToolTip_(REGEX_HELP)
+
+    # Run dialog
+    response = alert.runModal()
+
+    # Stop the timer
+    stop_timer.set()
+
+    if response == 1000:  # OK
+        return pattern_field.stringValue().strip()
     return None
 
 
@@ -875,7 +1167,7 @@ class LogWatchMenuBar(rumps.App):
         if directories or indexed_files:
             self.menu.add(self._menu_item(
                 "Watching:",
-                tooltip="Directories and files being monitored for errors"
+                tooltip="Directories and files being monitored for matches"
             ))
             for d in directories:
                 self.menu.add(self._menu_item(
@@ -895,29 +1187,52 @@ class LogWatchMenuBar(rumps.App):
 
         self.menu.add(rumps.separator)
 
-        # Error count section
-        total_errors = 0
+        # Match count section
+        total_matches = 0
         if self.watcher:
-            total_errors = self.watcher.get_total_error_count()
+            total_matches = self.watcher.get_total_error_count()
         self.menu.add(self._menu_item(
-            f"Total Exceptions: {total_errors}",
-            tooltip="Total error pattern matches found across all watched files"
+            f"Total Matches: {total_matches}",
+            tooltip="Total pattern matches found across all watched files"
         ))
 
-        # Recent errors section
+        # Recent matches section with datetime range
+        if self.recent_errors:
+            # Get oldest and newest timestamps
+            oldest_ts = self.recent_errors[-1][0]  # deque: newest first, oldest last
+            newest_ts = self.recent_errors[0][0]
+            if oldest_ts == newest_ts:
+                time_range = oldest_ts
+            else:
+                time_range = f"{oldest_ts} - {newest_ts}"
+            recent_label = f"Recent Matches ({time_range}):"
+        else:
+            recent_label = "Recent Matches:"
         self.menu.add(self._menu_item(
-            "Recent Errors:",
-            tooltip="Most recent errors detected (click to open file at line)"
+            recent_label,
+            tooltip="Matches detected - select to choose editor"
         ))
         if self.recent_errors:
             for timestamp, filename, filepath, line_num, message in self.recent_errors:
-                display_msg = message[:50] + "..." if len(message) > 50 else message
-                item_text = f"  [{timestamp}] {filename}:{line_num}: {display_msg}"
-                self.menu.add(self._menu_item(
+                display_msg = message[:40] + "..." if len(message) > 40 else message
+                item_text = f"  [{timestamp}] {filename}:{line_num}"
+                # Create submenu with editor options for each recent match
+                recent_item = self._menu_item(
                     item_text,
-                    callback=lambda _, fp=filepath, ln=line_num: self._open_file_at_line(fp, ln),
-                    tooltip=f"Click to open {filepath} at line {line_num}"
-                ))
+                    tooltip=display_msg
+                )
+                # Add enabled editors only
+                editors = self._get_editors()
+                for editor_id, config in editors.items():
+                    if not config.get("enabled", True):
+                        continue
+                    line_info = f" - opens at line {line_num}" if config.get("supports_line", True) else ""
+                    recent_item.add(self._menu_item(
+                        config["name"],
+                        callback=lambda _, fp=filepath, ln=line_num, eid=editor_id: self._open_in_editor(fp, ln, eid),
+                        tooltip=f"{config['name']}{line_info}"
+                    ))
+                self.menu.add(recent_item)
         else:
             self.menu.add(self._menu_item("  (none)"))
 
@@ -971,45 +1286,76 @@ class LogWatchMenuBar(rumps.App):
                 ))
         self.menu.add(scan_menu)
 
-        # Indexed files submenu with error counts
+        # Indexed files submenu with match counts
         if indexed_files:
             idx_menu = self._menu_item(
                 f"Indexed Files ({len(indexed_files)})",
                 tooltip="Log files discovered by scanning"
             )
+            # Add copy all paths option at the top
+            idx_menu.add(self._menu_item(
+                "Copy All Paths",
+                callback=self._copy_all_paths,
+                tooltip="Copy all monitored file paths to clipboard"
+            ))
+            idx_menu.add(rumps.separator)
             for filepath in sorted(indexed_files):
-                error_count = 0
+                match_count = 0
                 matched_lines = []
                 if self.watcher:
-                    error_count = self.watcher.get_error_count(filepath)
+                    match_count = self.watcher.get_error_count(filepath)
                     matched_lines = self.watcher.get_matched_lines(filepath)
                 filename = Path(filepath).name
                 short_path = filepath if len(filepath) < 50 else "..." + filepath[-47:]
                 # Create submenu for each file
                 file_menu = self._menu_item(
-                    f"{filename} [{error_count}]",
+                    f"{filename} [{match_count}]",
                     tooltip=filepath
                 )
                 file_menu.add(self._menu_item(
-                    "Open File",
-                    callback=lambda _, fp=filepath: self._open_file(fp),
-                    tooltip="Open in default application"
+                    "View in Finder",
+                    callback=lambda _, fp=filepath: self._reveal_in_finder(fp),
+                    tooltip="Reveal file in Finder"
                 ))
+                # Open With submenu for editor choices (only enabled editors)
+                open_menu = self._menu_item("Open With", tooltip="Choose application to open file")
+                editors = self._get_editors()
+                for editor_id, config in editors.items():
+                    if not config.get("enabled", True):
+                        continue
+                    line_info = " (at line 1)" if config.get("supports_line", True) else ""
+                    open_menu.add(self._menu_item(
+                        config["name"],
+                        callback=lambda _, fp=filepath, ln=1, eid=editor_id: self._open_in_editor(fp, ln, eid),
+                        tooltip=f"{config.get('command', '')}{line_info}"
+                    ))
+                file_menu.add(open_menu)
                 file_menu.add(rumps.separator)
                 # View Matches submenu
                 if matched_lines:
                     matches_menu = self._menu_item(
                         f"View Matches ({len(matched_lines)})",
-                        tooltip="Lines matching error patterns"
+                        tooltip="Lines matching patterns - opens editor submenu"
                     )
                     for match_tuple in matched_lines[-20:]:  # Show last 20
                         line_num, line_text = match_tuple[0], match_tuple[1]
-                        display_text = line_text[:60] + "..." if len(line_text) > 60 else line_text
-                        matches_menu.add(self._menu_item(
+                        display_text = line_text[:50] + "..." if len(line_text) > 50 else line_text
+                        # Create submenu for each match with editor options
+                        match_item = self._menu_item(
                             f"L{line_num}: {display_text}",
-                            callback=lambda _, fp=filepath, ln=line_num: self._open_file_at_line(fp, ln),
-                            tooltip="Click to open file at this line"
-                        ))
+                            tooltip=f"Line {line_num} - choose editor to open"
+                        )
+                        # Add enabled editors only
+                        for editor_id, config in editors.items():
+                            if not config.get("enabled", True):
+                                continue
+                            line_info = f" - opens at line {line_num}" if config.get("supports_line", True) else ""
+                            match_item.add(self._menu_item(
+                                config["name"],
+                                callback=lambda _, fp=filepath, ln=line_num, eid=editor_id: self._open_in_editor(fp, ln, eid),
+                                tooltip=f"{config['name']}{line_info}"
+                            ))
+                        matches_menu.add(match_item)
                     file_menu.add(matches_menu)
                 else:
                     file_menu.add(self._menu_item("View Matches (0)"))
@@ -1027,12 +1373,19 @@ class LogWatchMenuBar(rumps.App):
                     tooltip="Copy file to clipboard for pasting in Finder"
                 ))
                 file_menu.add(copy_menu)
+                # Only show "Show Processes" if processes have the file open
+                if self._has_file_processes(filepath):
+                    file_menu.add(self._menu_item(
+                        "Show Processes...",
+                        callback=lambda _, fp=filepath: self._show_file_processes(fp),
+                        tooltip="Show processes reading/writing this file"
+                    ))
                 file_menu.add(rumps.separator)
                 file_menu.add(self._menu_item(f"Path: {short_path}"))
                 file_menu.add(self._menu_item(
                     "Reset Count",
                     callback=lambda _, fp=filepath: self._reset_file_count(fp),
-                    tooltip="Reset error count for this file to zero"
+                    tooltip="Reset match count for this file to zero"
                 ))
                 file_menu.add(self._menu_item(
                     "Remove from Index",
@@ -1042,10 +1395,10 @@ class LogWatchMenuBar(rumps.App):
                 idx_menu.add(file_menu)
             self.menu.add(idx_menu)
 
-        # Error patterns submenu
+        # Match patterns submenu
         patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS)
         patterns_menu = self._menu_item(
-            f"Error Patterns ({len(patterns)})",
+            f"Match Patterns ({len(patterns)})",
             tooltip="Text patterns that trigger alerts when found in logs"
         )
         if self.reindexing:
@@ -1055,23 +1408,35 @@ class LogWatchMenuBar(rumps.App):
             patterns_menu.add(self._menu_item(
                 "Add Pattern...",
                 callback=self._add_pattern,
-                tooltip="Add a new error pattern to match"
+                tooltip="Add a new pattern to match"
             ))
         patterns_menu.add(rumps.separator)
         for pattern in patterns:
-            pattern_item = self._menu_item(
-                f"Remove: {pattern}",
-                tooltip=f"Stop matching '{pattern}'"
+            # Create submenu for each pattern with Edit and Remove options
+            pattern_submenu = self._menu_item(
+                pattern[:25] + "..." if len(pattern) > 25 else pattern,
+                tooltip=f"Options for pattern: {pattern}"
+            )
+            edit_item = self._menu_item(
+                "Edit",
+                tooltip=f"Modify this pattern"
+            )
+            remove_item = self._menu_item(
+                "Remove",
+                tooltip=f"Delete this pattern"
             )
             if not self.reindexing:
-                pattern_item.set_callback(lambda _, p=pattern: self._remove_pattern(p))
-            patterns_menu.add(pattern_item)
+                edit_item.set_callback(lambda _, p=pattern: self._edit_pattern(p))
+                remove_item.set_callback(lambda _, p=pattern: self._remove_pattern(p))
+            pattern_submenu.add(edit_item)
+            pattern_submenu.add(remove_item)
+            patterns_menu.add(pattern_submenu)
         self.menu.add(patterns_menu)
 
         # Time filter submenu
         time_menu = self._menu_item(
             "Time Filter",
-            tooltip="Only count errors within a specific time range"
+            tooltip="Only count matches within a specific time range"
         )
         start_str = self.start_datetime.strftime(DATETIME_FORMAT) if self.start_datetime else "Not set"
         end_str = self.end_datetime.strftime(DATETIME_FORMAT) if self.end_datetime else "Not set"
@@ -1116,17 +1481,17 @@ class LogWatchMenuBar(rumps.App):
             self.menu.add(self._menu_item(
                 "Re-scan Files (with sound)",
                 callback=self._rescan_with_sound,
-                tooltip="Re-read all files and play sound for each error found"
+                tooltip="Re-read all files and play sound for each match found"
             ))
         self.menu.add(self._menu_item(
             "Reset Counter",
             callback=self._reset_counter,
-            tooltip="Reset all error counts to zero"
+            tooltip="Reset all match counts to zero"
         ))
         self.menu.add(self._menu_item(
-            "Clear Recent Errors",
+            "Clear Recent Matches",
             callback=self._clear_errors,
-            tooltip="Clear the recent errors list"
+            tooltip="Clear the recent matches list"
         ))
 
         # Sound submenu
@@ -1165,6 +1530,42 @@ class LogWatchMenuBar(rumps.App):
         ))
 
         self.menu.add(sound_menu)
+
+        # Editors settings submenu
+        editors_menu = self._menu_item(
+            "Editors",
+            tooltip="Configure external editors for opening log files"
+        )
+        editors = self._get_editors()
+        for editor_id, config in editors.items():
+            enabled = config.get("enabled", True)
+            status = "ON" if enabled else "OFF"
+            editor_item = self._menu_item(
+                f"{config['name']} [{status}]",
+                tooltip=f"Command: {config.get('command', 'not set')}"
+            )
+            editor_item.add(self._menu_item(
+                "Toggle Enable/Disable",
+                callback=lambda _, eid=editor_id: self._toggle_editor(eid),
+                tooltip="Enable or disable this editor in menus"
+            ))
+            editor_item.add(self._menu_item(
+                "Locate...",
+                callback=lambda _, eid=editor_id: self._locate_editor(eid),
+                tooltip="Find where this editor is installed"
+            ))
+            editor_item.add(self._menu_item(
+                "Edit Command...",
+                callback=lambda _, eid=editor_id: self._edit_editor_command(eid),
+                tooltip="Modify the command used to open files"
+            ))
+            editor_item.add(self._menu_item(
+                "Reset to Default",
+                callback=lambda _, eid=editor_id: self._reset_editor(eid),
+                tooltip="Restore default command for this editor"
+            ))
+            editors_menu.add(editor_item)
+        self.menu.add(editors_menu)
 
         self.menu.add(rumps.separator)
         self.menu.add(self._menu_item(
@@ -1377,20 +1778,20 @@ class LogWatchMenuBar(rumps.App):
         threading.Thread(target=restart, daemon=True).start()
 
     def _reset_counter(self, _):
-        """Reset error counter."""
+        """Reset match counter."""
         if self.watcher:
             self.watcher.reset_counts()
         self.title = "Logwatch"
         self._build_menu()
 
     def _clear_errors(self, _):
-        """Clear recent errors."""
+        """Clear recent matches."""
         self.recent_errors.clear()
         self.title = "Logwatch"
         self._build_menu()
 
     def _rescan_with_sound(self, _):
-        """Re-scan all indexed files and play sound for each error found."""
+        """Re-scan all indexed files and play sound sequence for matches found."""
         if not self.watcher or self.reindexing:
             return
 
@@ -1398,10 +1799,11 @@ class LogWatchMenuBar(rumps.App):
         self.reindex_progress = 0.0
         self._build_menu()
 
+        error_count = [0]  # Use list to allow modification in nested function
+
         def on_error_found(filepath, line_num, message):
             """Called for each error found during rescan."""
-            if self.sound_enabled:
-                self._play_sound()
+            error_count[0] += 1
 
         def do_rescan():
             self.watcher.reindex_all_files(
@@ -1409,6 +1811,16 @@ class LogWatchMenuBar(rumps.App):
                 callback_error_found=on_error_found
             )
             self.reindexing = False
+
+            # Play up to 5 distinct sounds after scan completes
+            if self.sound_enabled and error_count[0] > 0:
+                sounds_to_play = min(error_count[0], 5)
+                for i in range(sounds_to_play):
+                    self._play_sound()
+                    if i < sounds_to_play - 1:
+                        import time
+                        time.sleep(0.7)  # Pause between sounds for distinct repetition
+
             AppHelper.callAfter(self._build_menu)
 
         thread = threading.Thread(target=do_rescan, daemon=True)
@@ -1550,7 +1962,9 @@ class LogWatchMenuBar(rumps.App):
             "Only matches after this time will be counted:",
             self.start_datetime
         )
-        if result:
+        if result == 'clear':
+            self._clear_start_datetime(None)
+        elif result:
             self.start_datetime = result
             self.config["start_datetime"] = result.strftime(DATETIME_FORMAT)
             self._save_config()
@@ -1563,7 +1977,9 @@ class LogWatchMenuBar(rumps.App):
             "Only matches before this time will be counted:",
             self.end_datetime
         )
-        if result:
+        if result == 'clear':
+            self._clear_end_datetime(None)
+        elif result:
             self.end_datetime = result
             self.config["end_datetime"] = result.strftime(DATETIME_FORMAT)
             self._save_config()
@@ -1613,10 +2029,17 @@ class LogWatchMenuBar(rumps.App):
         thread.start()
 
     def _reset_file_count(self, filepath):
-        """Reset error count for a specific file."""
+        """Reset match count for a specific file."""
         if self.watcher:
             self.watcher.reset_file_count(filepath)
         self._build_menu()
+
+    def _reveal_in_finder(self, filepath):
+        """Reveal a file in Finder."""
+        try:
+            subprocess.run(["open", "-R", filepath], check=False)
+        except Exception:
+            pass
 
     def _open_file(self, filepath):
         """Open a file in the default application."""
@@ -1625,27 +2048,357 @@ class LogWatchMenuBar(rumps.App):
         except Exception:
             pass
 
-    def _open_file_at_line(self, filepath, line_num):
-        """Open a file at a specific line number using common editors."""
-        # Try VS Code first, then Sublime, then fall back to default open
-        editors = [
-            ["code", "--goto", f"{filepath}:{line_num}"],
-            ["subl", f"{filepath}:{line_num}"],
-            ["open", "-a", "TextEdit", filepath],
-        ]
-        for cmd in editors:
+    def _get_editors(self):
+        """Get editor configurations from config, merging with defaults."""
+        saved_editors = self.config.get("editors", {})
+        editors = {}
+        for editor_id, default_config in DEFAULT_EDITORS.items():
+            if editor_id in saved_editors:
+                # Merge saved config with defaults
+                editors[editor_id] = {**default_config, **saved_editors[editor_id]}
+            else:
+                editors[editor_id] = default_config.copy()
+        return editors
+
+    def _open_in_editor(self, filepath, line_num, editor_id):
+        """Open a file at a specific line in the chosen editor."""
+        editors = self._get_editors()
+        editor_config = editors.get(editor_id)
+
+        if not editor_config:
+            self._show_alert("Error", f"Unknown editor: {editor_id}")
+            return
+
+        if not editor_config.get("enabled", True):
+            self._show_alert("Editor Disabled", f"{editor_config['name']} is disabled in settings.")
+            return
+
+        # Build command from template
+        command_template = editor_config.get("command", "")
+        command_str = command_template.replace("{file}", f'"{filepath}"').replace("{line}", str(line_num))
+
+        try:
+            if editor_config.get("use_terminal"):
+                # Run in Terminal using AppleScript
+                script = f'tell application "Terminal" to do script "{command_str}"'
+                subprocess.run(["osascript", "-e", script], check=False)
+            else:
+                # Run command directly via shell
+                result = subprocess.run(command_str, shell=True, capture_output=True, timeout=5)
+                if result.returncode != 0:
+                    self._show_alert(
+                        "Editor Not Found",
+                        f"Could not open {editor_config['name']}.\nCommand: {command_str}\nMake sure it's installed and in your PATH."
+                    )
+        except FileNotFoundError:
+            self._show_alert(
+                "Editor Not Found",
+                f"Could not find {editor_config['name']}. Make sure it's installed."
+            )
+        except subprocess.TimeoutExpired:
+            pass  # Editor probably opened fine, just didn't exit
+        except Exception as e:
+            self._show_alert("Error", f"Failed to open editor: {e}")
+
+    def _open_in_console(self, filepath):
+        """Open a log file in Console.app."""
+        try:
+            subprocess.run(["open", "-a", "Console", filepath], check=False)
+        except Exception:
+            pass
+
+    def _toggle_editor(self, editor_id):
+        """Toggle an editor's enabled state."""
+        editors = self.config.get("editors", {})
+        if editor_id not in editors:
+            editors[editor_id] = {}
+        current = editors[editor_id].get("enabled", DEFAULT_EDITORS.get(editor_id, {}).get("enabled", True))
+        editors[editor_id]["enabled"] = not current
+        self.config["editors"] = editors
+        self._save_config()
+        self._build_menu()
+
+    def _edit_editor_command(self, editor_id):
+        """Edit the command for an editor."""
+        editors = self._get_editors()
+        editor_config = editors.get(editor_id, {})
+        current_command = editor_config.get("command", "")
+
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Edit {editor_config.get('name', editor_id)} Command")
+        alert.setInformativeText_(
+            "Use {file} for the file path and {line} for the line number.\n"
+            "Example: code --goto {file}:{line}"
+        )
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
+
+        # Create text field for command
+        text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 24))
+        text_field.setStringValue_(current_command)
+        text_field.setFont_(NSFont.userFixedPitchFontOfSize_(12))
+        alert.setAccessoryView_(text_field)
+        alert.window().setLevel_(3)
+
+        response = alert.runModal()
+        if response == 1000:  # Save
+            new_command = text_field.stringValue().strip()
+            if new_command:
+                saved_editors = self.config.get("editors", {})
+                if editor_id not in saved_editors:
+                    saved_editors[editor_id] = {}
+                saved_editors[editor_id]["command"] = new_command
+                self.config["editors"] = saved_editors
+                self._save_config()
+                self._build_menu()
+
+    def _reset_editor(self, editor_id):
+        """Reset an editor to its default configuration."""
+        saved_editors = self.config.get("editors", {})
+        if editor_id in saved_editors:
+            del saved_editors[editor_id]
+            self.config["editors"] = saved_editors
+            self._save_config()
+            self._build_menu()
+
+    def _locate_editor(self, editor_id):
+        """Find where an editor is installed and display the results."""
+        editors = self._get_editors()
+        editor = editors.get(editor_id)
+        if not editor:
+            return
+
+        editor_name = editor.get("name", editor_id)
+        command = editor.get("command", "")
+
+        # Extract the command name (first word before any arguments)
+        cmd_name = command.split()[0] if command else ""
+
+        locations = []
+
+        # Try 'which' to find command in PATH
+        if cmd_name:
             try:
                 result = subprocess.run(
-                    cmd,
+                    ["which", cmd_name],
                     capture_output=True,
+                    text=True,
                     timeout=2
                 )
-                if result.returncode == 0:
-                    return
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                continue
-        # Fallback to default open
-        self._open_file(filepath)
+                if result.returncode == 0 and result.stdout.strip():
+                    locations.append(("PATH", result.stdout.strip()))
+            except (subprocess.TimeoutExpired, Exception):
+                pass
+
+        # Check common macOS application paths
+        app_paths = {
+            "console": ["/System/Applications/Utilities/Console.app"],
+            "vscode": [
+                "/Applications/Visual Studio Code.app",
+                "~/Applications/Visual Studio Code.app",
+            ],
+            "sublime": [
+                "/Applications/Sublime Text.app",
+                "~/Applications/Sublime Text.app",
+            ],
+            "bbedit": [
+                "/Applications/BBEdit.app",
+                "~/Applications/BBEdit.app",
+            ],
+            "emacs": [
+                "/Applications/Emacs.app",
+                "~/Applications/Emacs.app",
+                "/opt/homebrew/bin/emacs",
+                "/usr/local/bin/emacs",
+            ],
+            "textmate": [
+                "/Applications/TextMate.app",
+                "~/Applications/TextMate.app",
+            ],
+            "vim": [
+                "/opt/homebrew/bin/vim",
+                "/usr/local/bin/vim",
+                "/usr/bin/vim",
+            ],
+        }
+
+        if editor_id in app_paths:
+            for app_path in app_paths[editor_id]:
+                expanded = os.path.expanduser(app_path)
+                if os.path.exists(expanded):
+                    locations.append(("App", expanded))
+
+        # Display results
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Locate: {editor_name}")
+
+        if locations:
+            info_lines = []
+            for loc_type, loc_path in locations:
+                info_lines.append(f"{loc_type}: {loc_path}")
+            alert.setInformativeText_("\n".join(info_lines))
+        else:
+            alert.setInformativeText_(
+                f"'{cmd_name}' was not found.\n\n"
+                "Check that the editor is installed and the command is correct."
+            )
+
+        alert.addButtonWithTitle_("OK")
+        if locations:
+            alert.addButtonWithTitle_("Copy Path")
+        alert.window().setLevel_(3)
+
+        response = alert.runModal()
+        if response == 1001 and locations:  # Copy Path
+            # Copy the first location path
+            path_to_copy = locations[0][1]
+            subprocess.run(["pbcopy"], input=path_to_copy.encode("utf-8"), check=False)
+
+    def _get_process_details(self, pid):
+        """Get detailed information about a process by PID."""
+        details = {}
+        try:
+            # Get process path using ps
+            result = subprocess.run(
+                ["ps", "-p", pid, "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                details["path"] = result.stdout.strip()
+
+            # Get more info using ps
+            result = subprocess.run(
+                ["ps", "-p", pid, "-o", "pid=,ppid=,%cpu=,%mem=,etime=,state="],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split()
+                if len(parts) >= 5:
+                    details["ppid"] = parts[1]
+                    details["cpu"] = parts[2] + "%"
+                    details["mem"] = parts[3] + "%"
+                    details["elapsed"] = parts[4]
+                    if len(parts) >= 6:
+                        details["state"] = parts[5]
+        except Exception:
+            pass
+        return details
+
+    def _has_file_processes(self, filepath):
+        """Check if any processes have this file open."""
+        try:
+            result = subprocess.run(
+                ["lsof", filepath],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            output = result.stdout.strip()
+            if output:
+                lines = output.split("\n")
+                # More than just header line means processes found
+                return len(lines) > 1
+            return False
+        except (subprocess.TimeoutExpired, Exception):
+            return False
+
+    def _show_file_processes(self, filepath):
+        """Show processes that have this file open using lsof."""
+        try:
+            result = subprocess.run(
+                ["lsof", filepath],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            output = result.stdout.strip()
+
+            NSApp.activateIgnoringOtherApps_(True)
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(f"Processes: {Path(filepath).name}")
+
+            if output:
+                # Parse lsof output
+                lines = output.split("\n")
+                process_info = []
+                seen_pids = set()
+                if len(lines) > 1:  # Skip header
+                    for line in lines[1:]:
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            cmd = parts[0]
+                            pid = parts[1]
+                            user = parts[2]
+                            fd = parts[3]
+
+                            # Skip duplicate PIDs
+                            if pid in seen_pids:
+                                continue
+                            seen_pids.add(pid)
+
+                            # Determine read/write mode from FD column
+                            mode = "unknown"
+                            if "r" in fd.lower() and "w" in fd.lower():
+                                mode = "read/write"
+                            elif "r" in fd.lower():
+                                mode = "read"
+                            elif "w" in fd.lower():
+                                mode = "write"
+
+                            # Get additional process details
+                            details = self._get_process_details(pid)
+
+                            info_lines = [f"{cmd} (PID {pid}) - {mode}"]
+                            if details.get("path"):
+                                path = details["path"]
+                                if len(path) > 60:
+                                    path = "..." + path[-57:]
+                                info_lines.append(f"  Path: {path}")
+                            if details.get("cpu") and details.get("mem"):
+                                info_lines.append(f"  CPU: {details['cpu']}, Mem: {details['mem']}")
+                            if details.get("elapsed"):
+                                info_lines.append(f"  Running: {details['elapsed']}")
+                            if details.get("ppid"):
+                                info_lines.append(f"  Parent PID: {details['ppid']}")
+
+                            process_info.append("\n".join(info_lines))
+
+                if process_info:
+                    info_text = "\n\n".join(process_info)
+                else:
+                    info_text = "Could not parse process information"
+            else:
+                info_text = "No processes have this file open"
+
+            alert.setInformativeText_(info_text)
+            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_("Open Activity Monitor")
+            alert.window().setLevel_(3)
+
+            response = alert.runModal()
+            if response == 1001:  # Open Activity Monitor
+                subprocess.run(["open", "-a", "Activity Monitor"], check=False)
+
+        except subprocess.TimeoutExpired:
+            self._show_alert("Timeout", "lsof command timed out")
+        except Exception as e:
+            self._show_alert("Error", f"Could not get process info: {e}")
+
+    def _show_alert(self, title, message):
+        """Show a simple alert dialog."""
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.window().setLevel_(3)
+        alert.runModal()
 
     def _copy_path(self, filepath):
         """Copy file path to clipboard."""
@@ -1657,6 +2410,30 @@ class LogWatchMenuBar(rumps.App):
             )
         except Exception:
             pass
+
+    def _copy_all_paths(self, _):
+        """Copy all monitored file paths to clipboard."""
+        indexed_files = self.index.get("files", {})
+        directories = self.config.get("directories", [])
+
+        paths = []
+        # Add directories
+        for d in directories:
+            paths.append(f"[DIR] {d}")
+        # Add indexed files
+        for filepath in sorted(indexed_files.keys()):
+            paths.append(filepath)
+
+        if paths:
+            text = "\n".join(paths)
+            try:
+                subprocess.run(
+                    ["pbcopy"],
+                    input=text.encode("utf-8"),
+                    check=False
+                )
+            except Exception:
+                pass
 
     def _copy_file(self, filepath):
         """Copy file to clipboard using AppleScript."""
@@ -1689,27 +2466,34 @@ class LogWatchMenuBar(rumps.App):
             threading.Thread(target=restart, daemon=True).start()
 
     def _add_pattern(self, _):
-        """Add a new error pattern."""
-        response = rumps.Window(
-            message="Enter a pattern to match (case-insensitive).\nUse ^ at start for regex patterns:",
-            title="Add Error Pattern",
-            default_text="",
-            ok="Add",
-            cancel="Cancel",
-        ).run()
+        """Add a new match pattern."""
+        indexed_files = self.index.get("files", {})
+        pattern = show_pattern_editor("Add Match Pattern", indexed_files=indexed_files)
 
-        if response.clicked:
-            pattern = response.text.strip()
-            if pattern:
-                patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
-                if pattern not in patterns:
-                    patterns.append(pattern)
-                    self.config["error_patterns"] = patterns
-                    self._save_config()
-                    self._reindex_with_new_patterns()
+        if pattern:
+            patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
+            if pattern not in patterns:
+                patterns.append(pattern)
+                self.config["error_patterns"] = patterns
+                self._save_config()
+                self._reindex_with_new_patterns()
+
+    def _edit_pattern(self, old_pattern):
+        """Edit an existing match pattern."""
+        indexed_files = self.index.get("files", {})
+        new_pattern = show_pattern_editor("Edit Match Pattern", old_pattern, indexed_files=indexed_files)
+
+        if new_pattern and new_pattern != old_pattern:
+            patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
+            if old_pattern in patterns:
+                idx = patterns.index(old_pattern)
+                patterns[idx] = new_pattern
+                self.config["error_patterns"] = patterns
+                self._save_config()
+                self._reindex_with_new_patterns()
 
     def _remove_pattern(self, pattern):
-        """Remove an error pattern."""
+        """Remove a match pattern."""
         patterns = self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS.copy())
         if pattern in patterns:
             patterns.remove(pattern)

@@ -12,19 +12,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import unittest.mock as mock
+from logwatch_core import LOG_LINE_PATTERN, LogScanner
 
-# Mock the macOS-specific imports
-with mock.patch.dict('sys.modules', {
-    'rumps': mock.MagicMock(),
-    'AppKit': mock.MagicMock(),
-    'Foundation': mock.MagicMock(),
-    'PyObjCTools': mock.MagicMock(),
-    'PyObjCTools.AppHelper': mock.MagicMock(),
-}):
-    exec(open(Path(__file__).parent.parent / "logwatch-menubar.py").read())
-    LogScanner_class = LogScanner
-    LOG_LINE_PATTERN_re = LOG_LINE_PATTERN
+LogScanner_class = LogScanner
+LOG_LINE_PATTERN_re = LOG_LINE_PATTERN
 
 
 class TestLogFileDetection:

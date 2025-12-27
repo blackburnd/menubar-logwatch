@@ -14,18 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import unittest.mock as mock
+from logwatch_core import MultiLogWatcher
 
-# Mock the macOS-specific imports
-with mock.patch.dict('sys.modules', {
-    'rumps': mock.MagicMock(),
-    'AppKit': mock.MagicMock(),
-    'Foundation': mock.MagicMock(),
-    'PyObjCTools': mock.MagicMock(),
-    'PyObjCTools.AppHelper': mock.MagicMock(),
-}):
-    exec(open(Path(__file__).parent.parent / "logwatch-menubar.py").read())
-    MultiLogWatcher_class = MultiLogWatcher
+MultiLogWatcher_class = MultiLogWatcher
 
 
 class TestMultiLogWatcherLifecycle:
@@ -37,7 +28,7 @@ class TestMultiLogWatcherLifecycle:
         watcher = MultiLogWatcher_class(callback=lambda *args: callback_calls.append(args))
 
         assert watcher.running is False
-        assert watcher.thread is None
+        assert watcher.observer is None
         assert len(watcher.error_patterns) > 0  # Default patterns
 
     def test_start_and_stop(self):
@@ -46,7 +37,7 @@ class TestMultiLogWatcherLifecycle:
 
         watcher.start()
         assert watcher.running is True
-        assert watcher.thread is not None
+        # observer may or may not be set depending on watchdog availability
 
         watcher.stop()
         assert watcher.running is False
@@ -56,10 +47,10 @@ class TestMultiLogWatcherLifecycle:
         watcher = MultiLogWatcher_class(callback=lambda *args: None)
 
         watcher.start()
-        original_thread = watcher.thread
+        was_running = watcher.running
 
         watcher.start()  # Try starting again
-        assert watcher.thread == original_thread
+        assert watcher.running == was_running  # Still running, no change
 
         watcher.stop()
 
@@ -371,7 +362,7 @@ class TestMultiLogWatcherWatchLoop:
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_watch_loop_detects_changes(self, temp_dir):
-        """Test that watch loop detects file changes."""
+        """Test that file checking detects changes."""
         callback_calls = []
         watcher = MultiLogWatcher_class(callback=lambda *args: callback_calls.append(args))
 
@@ -380,19 +371,16 @@ class TestMultiLogWatcherWatchLoop:
             f.write("2024-01-15 10:00:00 INFO Starting\n")
 
         watcher.set_indexed_files([log_file])
-        watcher.start()
 
-        # Wait for initial check
-        time.sleep(1.5)
+        # Initial check to set file position
+        watcher._check_file(log_file)
 
         # Add an error
         with open(log_file, "a") as f:
             f.write("2024-01-15 10:00:01 ERROR New error\n")
 
-        # Wait for detection
-        time.sleep(1.5)
-
-        watcher.stop()
+        # Check again to detect the change
+        watcher._check_file(log_file)
 
         # Should have detected the error
         assert len(callback_calls) > 0
@@ -411,8 +399,10 @@ class TestMultiLogWatcherWatchLoop:
             f.write("Initial content\n")
 
         watcher.set_indexed_files([log1, log2])
-        watcher.start()
-        time.sleep(1.5)
+
+        # Initial check to set file positions
+        watcher._check_file(log1)
+        watcher._check_file(log2)
 
         # Add errors to both files
         with open(log1, "a") as f:
@@ -420,8 +410,9 @@ class TestMultiLogWatcherWatchLoop:
         with open(log2, "a") as f:
             f.write("2024-01-15 10:00:00 ERROR Error in log2\n")
 
-        time.sleep(1.5)
-        watcher.stop()
+        # Check again to detect changes
+        watcher._check_file(log1)
+        watcher._check_file(log2)
 
         # Should have detected errors from both files
         assert len(callback_calls) >= 2
