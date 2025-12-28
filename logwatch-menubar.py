@@ -352,8 +352,8 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     sound_label.setFont_(NSFont.systemFontOfSize_(11))
     container.addSubview_(sound_label)
 
-    # Sound selector popup
-    sound_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(50, 190, 300, 24))
+    # Sound selector popup with auto-play on change
+    sound_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(50, 190, 400, 24))
 
     # Get system sounds
     system_sounds_dir = Path("/System/Library/Sounds")
@@ -374,20 +374,14 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     if sounds_list:
         sound_popup.selectItemAtIndex_(selected_index)
 
-    container.addSubview_(sound_popup)
-
-    # Preview sound button - using a helper class for callback
-    class PreviewButtonHandler(NSObject):
-        def initWithPopup_(self, popup):
-            self = objc.super(PreviewButtonHandler, self).init()
-            if self is None:
-                return None
-            self.popup = popup
+    # Handler to play sound when selection changes
+    class SoundChangeHandler(NSObject):
+        def init(self):
+            self = objc.super(SoundChangeHandler, self).init()
             return self
 
-        @objc.python_method
-        def preview_(self, sender):
-            selected_item = self.popup.selectedItem()
+        def soundChanged_(self, sender):
+            selected_item = sender.selectedItem()
             if selected_item:
                 sound_path = selected_item.representedObject()
                 try:
@@ -399,13 +393,11 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
                 except Exception:
                     pass
 
-    preview_handler = PreviewButtonHandler.alloc().initWithPopup_(sound_popup)
-    preview_button = NSButton.alloc().initWithFrame_(NSMakeRect(360, 190, 90, 24))
-    preview_button.setTitle_("Preview")
-    preview_button.setBezelStyle_(1)  # Rounded button
-    preview_button.setTarget_(preview_handler)
-    preview_button.setAction_("preview:")
-    container.addSubview_(preview_button)
+    sound_handler = SoundChangeHandler.alloc().init()
+    sound_popup.setTarget_(sound_handler)
+    sound_popup.setAction_("soundChanged:")
+
+    container.addSubview_(sound_popup)
 
     # File selector row
     file_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 162, 80, 20))
