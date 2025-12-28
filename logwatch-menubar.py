@@ -215,18 +215,18 @@ def show_datetime_picker(title, message, initial_datetime=None):
     alert.addButtonWithTitle_("Clear")
     alert.addButtonWithTitle_("Cancel")
 
-    # Create container view for the calendar and time picker
-    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 280, 230))
+    # Create container view for the calendar and time picker (larger with better spacing)
+    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 270))
 
     # Create graphical calendar picker for date (larger, shows month grid)
-    calendar_picker = NSDatePicker.alloc().initWithFrame_(NSMakeRect(0, 40, 280, 190))
+    calendar_picker = NSDatePicker.alloc().initWithFrame_(NSMakeRect(10, 55, 300, 210))
     calendar_picker.setDatePickerStyle_(NSDatePickerStyleClockAndCalendar)
     calendar_picker.setDatePickerElements_(NSDatePickerElementFlagYearMonthDay)
     calendar_picker.setBezeled_(False)
     calendar_picker.setDrawsBackground_(False)
 
-    # Create text field stepper for time (compact, below calendar)
-    time_picker = NSDatePicker.alloc().initWithFrame_(NSMakeRect(70, 5, 140, 28))
+    # Create text field stepper for time (compact, below calendar with spacing)
+    time_picker = NSDatePicker.alloc().initWithFrame_(NSMakeRect(90, 15, 140, 28))
     time_picker.setDatePickerStyle_(NSDatePickerStyleTextFieldAndStepper)
     time_picker.setDatePickerElements_(NSDatePickerElementFlagHourMinuteSecond)
 
@@ -278,6 +278,26 @@ REGEX_HELP = """Common patterns:
   ^\\[ERROR\\]   - Match literal [ERROR]
   failed.*conn   - 'failed' followed by 'conn'
   \\d+           - One or more digits"""
+
+
+# Handler class for sound popup auto-play (defined at module level to avoid re-registration)
+class SoundChangeHandler(NSObject):
+    def init(self):
+        self = objc.super(SoundChangeHandler, self).init()
+        return self
+
+    def soundChanged_(self, sender):
+        selected_item = sender.selectedItem()
+        if selected_item:
+            sound_path = selected_item.representedObject()
+            try:
+                subprocess.Popen(
+                    ["afplay", sound_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
 
 
 def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
@@ -374,25 +394,7 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     if sounds_list:
         sound_popup.selectItemAtIndex_(selected_index)
 
-    # Handler to play sound when selection changes
-    class SoundChangeHandler(NSObject):
-        def init(self):
-            self = objc.super(SoundChangeHandler, self).init()
-            return self
-
-        def soundChanged_(self, sender):
-            selected_item = sender.selectedItem()
-            if selected_item:
-                sound_path = selected_item.representedObject()
-                try:
-                    subprocess.Popen(
-                        ["afplay", sound_path],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-
+    # Set up handler for auto-play on sound selection change
     sound_handler = SoundChangeHandler.alloc().init()
     sound_popup.setTarget_(sound_handler)
     sound_popup.setAction_("soundChanged:")
@@ -585,12 +587,18 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     # Add tooltip with regex help
     pattern_field.setToolTip_(REGEX_HELP)
 
+    # Set initial focus to pattern field
+    alert.window().setInitialFirstResponder_(pattern_field)
+
     # Run dialog
     response = alert.runModal()
 
-    # Stop the timer
+    # Stop the timer and wait for it to finish
     stop_timer.set()
+    timer_thread.join(timeout=1.0)
 
+    # Clean up references to prevent retention
+    result = None
     if response == 1000:  # OK
         pattern_str = pattern_field.stringValue().strip()
         title_str = title_field.stringValue().strip()
@@ -602,8 +610,13 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
             # If no title provided, use the pattern as title
             if not title_str:
                 title_str = pattern_str.capitalize()
-            return {"title": title_str, "pattern": pattern_str, "sound": sound_path}
-    return None
+            result = {"title": title_str, "pattern": pattern_str, "sound": sound_path}
+
+    # Explicitly clean up handler references
+    sound_popup.setTarget_(None)
+    sound_popup.setAction_(None)
+
+    return result
 
 
 def show_logfile_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
@@ -853,16 +866,20 @@ def show_logfile_pattern_editor(dialog_title, initial_pattern=None, indexed_file
     # Run dialog
     response = alert.runModal()
 
-    # Stop the timer
+    # Stop the timer and wait for it to finish
     stop_timer.set()
+    timer_thread.join(timeout=1.0)
 
+    # Process response
+    result = None
     if response == 1000:  # OK
         pattern_str = pattern_field.string().strip()
         if pattern_str:
-            return pattern_str
+            result = pattern_str
     elif response == 1001:  # Reset to Default
-        return DEFAULT_LOG_LINE_PATTERN
-    return None
+        result = DEFAULT_LOG_LINE_PATTERN
+
+    return result
 
 
 class LogScanner:
@@ -1766,7 +1783,14 @@ class LogWatchMenuBar(rumps.App):
                 tooltip="Copy all monitored file paths to clipboard"
             ))
             idx_menu.add(rumps.separator)
-            for filepath in sorted(indexed_files):
+
+            # Sort files by match count (descending), then by filepath (ascending)
+            sorted_files = sorted(
+                indexed_files.keys(),
+                key=lambda fp: (-self.watcher.get_error_count(fp) if self.watcher else 0, fp)
+            )
+
+            for filepath in sorted_files:
                 match_count = 0
                 matched_lines = []
                 if self.watcher:
