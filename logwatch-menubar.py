@@ -380,14 +380,24 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     preview_label.setFont_(NSFont.systemFontOfSize_(10))
     container.addSubview_(preview_label)
 
-    # Sample lines display (small font, read-only)
-    sample_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 130))
+    # Sample lines display in scroll view (fixed size)
+    scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 130))
+    scroll_view.setBorderType_(NSBezelBorder)
+    scroll_view.setHasVerticalScroller_(True)
+    scroll_view.setHasHorizontalScroller_(False)
+    scroll_view.setAutohidesScrollers_(True)
+
+    sample_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 430, 130))
     sample_view.setFont_(NSFont.userFixedPitchFontOfSize_(9))
     sample_view.setEditable_(False)
     sample_view.setSelectable_(True)
     sample_view.setBackgroundColor_(NSColor.textBackgroundColor())
+    sample_view.setVerticallyResizable_(True)
+    sample_view.setHorizontallyResizable_(False)
+    sample_view.textContainer().setWidthTracksTextView_(True)
 
-    container.addSubview_(sample_view)
+    scroll_view.setDocumentView_(sample_view)
+    container.addSubview_(scroll_view)
 
     alert.setAccessoryView_(container)
     alert.window().setLevel_(3)  # Float above others
@@ -1872,11 +1882,10 @@ class LogWatchMenuBar(rumps.App):
         """Clear the indexed files."""
         self.index["files"] = {}
         self._save_index()
-        # Restart watcher in background to avoid blocking UI
-        def restart():
-            self._start_watcher()
-            AppHelper.callAfter(self._build_menu)
-        threading.Thread(target=restart, daemon=True).start()
+        # Clear watcher's indexed files as well
+        if self.watcher:
+            self.watcher.set_indexed_files([])
+        self._build_menu()
 
     def _reset_counter(self, _):
         """Reset match counter."""
