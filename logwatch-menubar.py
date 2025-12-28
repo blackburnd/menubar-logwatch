@@ -29,7 +29,7 @@ from AppKit import (
     NSBezelBorder, NSTableViewSelectionHighlightStyleRegular,
     NSMenu, NSColor, NSTextView, NSAttributedString, NSFontAttributeName,
     NSForegroundColorAttributeName, NSBackgroundColorAttributeName,
-    NSMutableAttributedString, NSPopUpButton
+    NSMutableAttributedString, NSPopUpButton, NSButton, NSOnState, NSOffState
 )
 from PyObjCTools import AppHelper
 import objc
@@ -112,14 +112,18 @@ DEFAULT_EDITORS = {
     },
 }
 
-# Pattern to detect log file format (timestamp at start of line)
-LOG_LINE_PATTERN = re.compile(
+# Default pattern to detect log file format (timestamp at start of line)
+DEFAULT_LOG_LINE_PATTERN = (
     r"^\d{4}[-/]\d{2}[-/]\d{2}|"  # 2024-01-01 or 2024/01/01
     r"^\d{2}[-/]\d{2}[-/]\d{4}|"  # 01-01-2024 or 01/01/2024
     r"^\[\d{4}[-/]\d{2}[-/]\d{2}|"  # [2024-01-01
     r"^\d{2}:\d{2}:\d{2}|"  # 12:30:45
     r"^\w{3}\s+\d{1,2}\s+\d{2}:\d{2}"  # Jan 15 12:30
 )
+
+# Pattern to detect log file format (timestamp at start of line)
+# This will be updated from config
+LOG_LINE_PATTERN = re.compile(DEFAULT_LOG_LINE_PATTERN)
 
 # Patterns for extracting timestamps from log lines
 TIMESTAMP_PATTERNS = [
@@ -372,27 +376,35 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
 
     container.addSubview_(sound_popup)
 
-    # Preview sound button
-    def preview_sound_action(sender):
-        selected_item = sound_popup.selectedItem()
-        if selected_item:
-            sound_path = selected_item.representedObject()
-            try:
-                subprocess.Popen(
-                    ["afplay", sound_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
+    # Preview sound button - using a helper class for callback
+    class PreviewButtonHandler(NSObject):
+        def initWithPopup_(self, popup):
+            self = objc.super(PreviewButtonHandler, self).init()
+            if self is None:
+                return None
+            self.popup = popup
+            return self
 
+        @objc.python_method
+        def preview_(self, sender):
+            selected_item = self.popup.selectedItem()
+            if selected_item:
+                sound_path = selected_item.representedObject()
+                try:
+                    subprocess.Popen(
+                        ["afplay", sound_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+
+    preview_handler = PreviewButtonHandler.alloc().initWithPopup_(sound_popup)
     preview_button = NSButton.alloc().initWithFrame_(NSMakeRect(360, 190, 90, 24))
     preview_button.setTitle_("Preview")
     preview_button.setBezelStyle_(1)  # Rounded button
-    preview_button.setTarget_(preview_button)
-    preview_button.setAction_("performClick:")
-    # Store the callback
-    preview_button.preview_callback = preview_sound_action
+    preview_button.setTarget_(preview_handler)
+    preview_button.setAction_("preview:")
     container.addSubview_(preview_button)
 
     # File selector row
@@ -599,6 +611,265 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
             if not title_str:
                 title_str = pattern_str.capitalize()
             return {"title": title_str, "pattern": pattern_str, "sound": sound_path}
+    return None
+
+
+def show_logfile_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
+    """Show logfile pattern editor with live preview against sample/indexed files.
+
+    Args:
+        dialog_title: Dialog title
+        initial_pattern: Pre-filled pattern string (regex)
+        indexed_files: Optional dict of {filepath: {...}} for file selection
+
+    Returns regex pattern string, or None if cancelled.
+    """
+    NSApp.activateIgnoringOtherApps_(True)
+
+    if initial_pattern is None:
+        initial_pattern = DEFAULT_LOG_LINE_PATTERN
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(dialog_title)
+    alert.setInformativeText_("Define the regex pattern used to identify log files that do not have standard suffix naming")
+    alert.addButtonWithTitle_("OK")
+    alert.addButtonWithTitle_("Cancel")
+    alert.addButtonWithTitle_("Reset to Default")
+
+    # Create container view
+    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 280))
+
+    # Pattern label
+    pattern_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 252, 60, 20))
+    pattern_label.setStringValue_("Pattern:")
+    pattern_label.setBezeled_(False)
+    pattern_label.setDrawsBackground_(False)
+    pattern_label.setEditable_(False)
+    pattern_label.setSelectable_(False)
+    pattern_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(pattern_label)
+
+    # Pattern input field (multiline for better editing of complex regex)
+    pattern_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(60, 220, 440, 54))
+    pattern_scroll.setBorderType_(NSBezelBorder)
+    pattern_scroll.setHasVerticalScroller_(True)
+    pattern_scroll.setHasHorizontalScroller_(False)
+    pattern_scroll.setAutohidesScrollers_(True)
+
+    pattern_field = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 54))
+    pattern_field.setString_(initial_pattern)
+    pattern_field.setFont_(NSFont.userFixedPitchFontOfSize_(10))
+    pattern_field.setVerticallyResizable_(True)
+    pattern_field.setHorizontallyResizable_(False)
+    pattern_field.textContainer().setWidthTracksTextView_(True)
+
+    pattern_scroll.setDocumentView_(pattern_field)
+    container.addSubview_(pattern_scroll)
+
+    # Help text
+    help_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 195, 500, 20))
+    help_label.setStringValue_("This pattern identifies which files are log files during scanning")
+    help_label.setBezeled_(False)
+    help_label.setDrawsBackground_(False)
+    help_label.setEditable_(False)
+    help_label.setSelectable_(False)
+    help_label.setFont_(NSFont.systemFontOfSize_(9))
+    help_label.setTextColor_(NSColor.secondaryLabelColor())
+    container.addSubview_(help_label)
+
+    # File selector row
+    file_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 165, 80, 20))
+    file_label.setStringValue_("Test with:")
+    file_label.setBezeled_(False)
+    file_label.setDrawsBackground_(False)
+    file_label.setEditable_(False)
+    file_label.setSelectable_(False)
+    file_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(file_label)
+
+    # File selector popup
+    file_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(80, 163, 420, 24))
+    file_popup.addItemWithTitle_("Sample log lines")
+
+    # Build list of indexed files
+    file_paths = []
+    if indexed_files:
+        for filepath in sorted(indexed_files.keys()):
+            filename = Path(filepath).name
+            file_popup.addItemWithTitle_(filename)
+            file_paths.append(filepath)
+
+    container.addSubview_(file_popup)
+
+    # Preview label
+    preview_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 138, 500, 18))
+    preview_label.setStringValue_("Preview (matching lines highlighted in green):")
+    preview_label.setBezeled_(False)
+    preview_label.setDrawsBackground_(False)
+    preview_label.setEditable_(False)
+    preview_label.setSelectable_(False)
+    preview_label.setFont_(NSFont.systemFontOfSize_(10))
+    container.addSubview_(preview_label)
+
+    # Sample lines display in scroll view
+    scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 133))
+    scroll_view.setBorderType_(NSBezelBorder)
+    scroll_view.setHasVerticalScroller_(True)
+    scroll_view.setHasHorizontalScroller_(False)
+    scroll_view.setAutohidesScrollers_(True)
+
+    sample_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 133))
+    sample_view.setFont_(NSFont.userFixedPitchFontOfSize_(9))
+    sample_view.setEditable_(False)
+    sample_view.setSelectable_(True)
+    sample_view.setBackgroundColor_(NSColor.textBackgroundColor())
+    sample_view.setVerticallyResizable_(True)
+    sample_view.setHorizontallyResizable_(False)
+    sample_view.textContainer().setWidthTracksTextView_(True)
+
+    scroll_view.setDocumentView_(sample_view)
+    container.addSubview_(scroll_view)
+
+    alert.setAccessoryView_(container)
+    alert.window().setLevel_(3)  # Float above others
+
+    # Store references and current sample lines for the update function
+    state = {
+        'pattern_field': pattern_field,
+        'sample_view': sample_view,
+        'file_popup': file_popup,
+        'file_paths': file_paths,
+        'current_lines': SAMPLE_LOG_LINES[:],
+        'last_file_index': 0
+    }
+
+    def load_file_lines(filepath, max_lines=20):
+        """Load sample lines from a file."""
+        lines = []
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f):
+                    if i >= max_lines:
+                        break
+                    stripped = line.rstrip("\n\r")
+                    if stripped:  # Skip empty lines
+                        lines.append(stripped[:120])  # Truncate long lines
+        except Exception:
+            lines = ["(Could not read file)"]
+        return lines if lines else ["(File is empty)"]
+
+    def update_preview():
+        """Update the preview with highlighted matches."""
+        # Check if file selection changed
+        current_file_index = state['file_popup'].indexOfSelectedItem()
+        if current_file_index != state['last_file_index']:
+            state['last_file_index'] = current_file_index
+            if current_file_index == 0:
+                # Sample lines
+                state['current_lines'] = SAMPLE_LOG_LINES[:]
+            else:
+                # Load from indexed file
+                filepath = state['file_paths'][current_file_index - 1]
+                state['current_lines'] = load_file_lines(filepath)
+
+        pattern_text = state['pattern_field'].string().strip()
+        current_lines = state['current_lines']
+
+        # Create attributed string for the sample view
+        attr_string = NSMutableAttributedString.alloc().initWithString_("")
+
+        small_font = NSFont.userFixedPitchFontOfSize_(9)
+        normal_attrs = {
+            NSFontAttributeName: small_font,
+            NSForegroundColorAttributeName: NSColor.textColor()
+        }
+        match_attrs = {
+            NSFontAttributeName: small_font,
+            NSForegroundColorAttributeName: NSColor.textColor(),
+            NSBackgroundColorAttributeName: NSColor.systemGreenColor()
+        }
+
+        if pattern_text:
+            try:
+                # Compile pattern as regex
+                regex = re.compile(pattern_text)
+
+                for i, line in enumerate(current_lines):
+                    if i > 0:
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_("\n", normal_attrs)
+                        )
+
+                    # Check if line matches
+                    if regex.match(line):
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_(line, match_attrs)
+                        )
+                    else:
+                        attr_string.appendAttributedString_(
+                            NSAttributedString.alloc().initWithString_attributes_(line, normal_attrs)
+                        )
+            except re.error:
+                # Invalid regex - show error message
+                error_msg = "(Invalid regex pattern)"
+                attr_string.appendAttributedString_(
+                    NSAttributedString.alloc().initWithString_attributes_(
+                        error_msg,
+                        {
+                            NSFontAttributeName: small_font,
+                            NSForegroundColorAttributeName: NSColor.systemRedColor()
+                        }
+                    )
+                )
+        else:
+            # No pattern - show all lines normally
+            for i, line in enumerate(current_lines):
+                if i > 0:
+                    attr_string.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_("\n", normal_attrs)
+                    )
+                attr_string.appendAttributedString_(
+                    NSAttributedString.alloc().initWithString_attributes_(line, normal_attrs)
+                )
+
+        state['sample_view'].textStorage().setAttributedString_(attr_string)
+
+    # Set up timer to update preview periodically while dialog is open
+    stop_timer = threading.Event()
+
+    def timer_loop():
+        last_pattern = ""
+        last_file_idx = 0
+        while not stop_timer.is_set():
+            try:
+                current_pattern = state['pattern_field'].string()
+                current_file_idx = state['file_popup'].indexOfSelectedItem()
+                if current_pattern != last_pattern or current_file_idx != last_file_idx:
+                    last_pattern = current_pattern
+                    last_file_idx = current_file_idx
+                    AppHelper.callAfter(update_preview)
+            except Exception:
+                pass
+            stop_timer.wait(0.2)
+
+    timer_thread = threading.Thread(target=timer_loop, daemon=True)
+    timer_thread.start()
+
+    # Initial preview update
+    update_preview()
+
+    # Run dialog
+    response = alert.runModal()
+
+    # Stop the timer
+    stop_timer.set()
+
+    if response == 1000:  # OK
+        pattern_str = pattern_field.string().strip()
+        if pattern_str:
+            return pattern_str
+    elif response == 1001:  # Reset to Default
+        return DEFAULT_LOG_LINE_PATTERN
     return None
 
 
@@ -1038,9 +1309,9 @@ class MultiLogWatcher:
                         if self._is_in_datetime_range(line_timestamp):
                             total_count += match_count
                             self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
-                            # Notify about each error found
+                            # Notify about each error found with matched patterns
                             if callback_error_found:
-                                callback_error_found(filepath, line_num, line.strip())
+                                callback_error_found(filepath, line_num, line.strip(), matched_patterns)
                     line_num += 1
         except Exception:
             return
@@ -1244,9 +1515,9 @@ class LogWatchMenuBar(rumps.App):
         self.scan_progress = 0.0
         self.reindexing = False
         self.reindex_progress = 0.0
-        self.sound_count = 0  # Track sounds played in current burst
-        self.sound_reset_time = None  # Time to reset sound count
-        self.max_sounds_per_burst = 5  # Maximum sounds to play in quick succession
+        self.sounds_played_in_burst = set()  # Track unique sounds played in current burst
+        self.sound_reset_time = None  # Time to reset sound tracking
+        self.max_sounds_per_burst = 5  # Maximum unique sounds to play in quick succession
 
         self._build_menu()
         self._start_watcher()
@@ -1271,6 +1542,14 @@ class LogWatchMenuBar(rumps.App):
                     if "log_dir" in config and "directories" not in config:
                         old_dir = config.pop("log_dir")
                         config["directories"] = [old_dir] if old_dir else []
+                    # Update LOG_LINE_PATTERN if custom pattern is defined
+                    if "log_line_pattern" in config:
+                        global LOG_LINE_PATTERN
+                        try:
+                            LOG_LINE_PATTERN = re.compile(config["log_line_pattern"])
+                        except re.error:
+                            # Invalid pattern, use default
+                            LOG_LINE_PATTERN = re.compile(DEFAULT_LOG_LINE_PATTERN)
                     return config
             except Exception:
                 pass
@@ -1322,11 +1601,38 @@ class LogWatchMenuBar(rumps.App):
         """Build the dropdown menu."""
         self.menu.clear()
 
-        # PID display for manual process management
+        # PID and thread information for manual process management
+        active_threads = threading.active_count()
+        thread_info = [
+            f"Main PID: {self.pid}",
+        ]
+
+        # Add observer thread info if running
+        if self.watcher and self.watcher.running and self.watcher.observer:
+            observer_thread = None
+            for thread in threading.enumerate():
+                if 'observer' in thread.name.lower() or 'watchdog' in thread.name.lower():
+                    observer_thread = thread
+                    break
+            if observer_thread and observer_thread.is_alive():
+                thread_info.append(f"Observer: Active (TID: {observer_thread.ident})")
+
+        # Add scanner thread info if running
+        if self.scanner and self.scanner.running:
+            scanner_thread = self.scanner.thread
+            if scanner_thread and scanner_thread.is_alive():
+                thread_info.append(f"Scanner: Active (TID: {scanner_thread.ident})")
+
+        # Display process info
         self.menu.add(self._menu_item(
-            f"PID: {self.pid}",
-            tooltip="Process ID - use 'kill {0}' in terminal to stop".format(self.pid)
+            f"Process Info ({active_threads} threads)",
+            tooltip="Process and thread information"
         ))
+        for info in thread_info:
+            self.menu.add(self._menu_item(
+                f"  {info}",
+                tooltip="Use 'kill {0}' in terminal to stop main process".format(self.pid)
+            ))
         self.menu.add(rumps.separator)
 
         # Status section
@@ -1407,6 +1713,11 @@ class LogWatchMenuBar(rumps.App):
             "Directories",
             tooltip="Manage watched directories"
         )
+        dir_menu.add(self._menu_item(
+            "Logfile definition...",
+            callback=self._edit_logfile_pattern,
+            tooltip="Configure the regex pattern used to identify log files"
+        ))
         dir_menu.add(self._menu_item(
             "Add Directory...",
             callback=self._add_directory,
@@ -1845,14 +2156,14 @@ class LogWatchMenuBar(rumps.App):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.recent_errors.appendleft((timestamp, filename, filepath, line_num, message))
 
-        # Play sound with burst limiting (max 5 sounds in 2 seconds)
+        # Play sound with burst limiting - each unique sound plays once per burst
         if self.sound_enabled:
             now = datetime.now()
-            # Reset counter if enough time has passed since last burst
+            # Reset tracking if enough time has passed since last burst
             if self.sound_reset_time is None or now > self.sound_reset_time:
-                self.sound_count = 0
+                self.sounds_played_in_burst.clear()
 
-            if self.sound_count < self.max_sounds_per_burst:
+            if len(self.sounds_played_in_burst) < self.max_sounds_per_burst:
                 # Get the sound for the first matched pattern
                 sound_to_play = None
                 if matched_patterns:
@@ -1863,15 +2174,17 @@ class LogWatchMenuBar(rumps.App):
                             sound_to_play = pattern_dict.get("sound", "/System/Library/Sounds/Glass.aiff")
                             break
 
-                if sound_to_play:
-                    self._play_sound_file(sound_to_play)
-                else:
-                    self._play_sound()  # Fallback to default sound
+                if not sound_to_play:
+                    sound_to_play = self.config.get("sound_path", DEFAULT_SOUND)
 
-                self.sound_count += 1
-                # Reset counter 2 seconds after first sound in burst
-                if self.sound_count == 1:
-                    self.sound_reset_time = now + timedelta(seconds=2)
+                # Only play if this sound hasn't been played in this burst
+                if sound_to_play not in self.sounds_played_in_burst:
+                    self._play_sound_file(sound_to_play)
+                    self.sounds_played_in_burst.add(sound_to_play)
+
+                    # Reset tracking 2 seconds after first sound in burst
+                    if len(self.sounds_played_in_burst) == 1:
+                        self.sound_reset_time = now + timedelta(seconds=2)
 
         # Schedule UI updates on main thread
         def update_ui():
@@ -1923,6 +2236,33 @@ class LogWatchMenuBar(rumps.App):
         except Exception:
             pass
         return None
+
+    def _edit_logfile_pattern(self, _):
+        """Edit the log file detection pattern."""
+        indexed_files = self.index.get("files", {})
+        current_pattern = self.config.get("log_line_pattern", DEFAULT_LOG_LINE_PATTERN)
+
+        new_pattern = show_logfile_pattern_editor(
+            "Logfile Pattern Definition",
+            initial_pattern=current_pattern,
+            indexed_files=indexed_files
+        )
+
+        if new_pattern:
+            # Save new pattern to config
+            self.config["log_line_pattern"] = new_pattern
+            self._save_config()
+
+            # Update the global pattern
+            global LOG_LINE_PATTERN
+            try:
+                LOG_LINE_PATTERN = re.compile(new_pattern)
+            except re.error:
+                # This should not happen as the dialog validates, but just in case
+                LOG_LINE_PATTERN = re.compile(DEFAULT_LOG_LINE_PATTERN)
+
+            # Rescan to pick up files that now match the new pattern
+            self._reindex_after_directory_change()
 
     def _add_directory(self, _):
         """Add a directory to watch."""
@@ -2047,7 +2387,7 @@ class LogWatchMenuBar(rumps.App):
         self._build_menu()
 
     def _rescan_with_sound(self, _):
-        """Re-scan all indexed files and play sound sequence for matches found."""
+        """Re-scan all indexed files and play each unique sound once."""
         if not self.watcher or self.reindexing:
             return
 
@@ -2055,11 +2395,18 @@ class LogWatchMenuBar(rumps.App):
         self.reindex_progress = 0.0
         self._build_menu()
 
-        error_count = [0]  # Use list to allow modification in nested function
+        unique_sounds = set()  # Track unique sounds found
+        patterns_config = normalize_patterns(self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS))
 
-        def on_error_found(filepath, line_num, message):
+        def on_error_found(filepath, line_num, message, matched_patterns=None):
             """Called for each error found during rescan."""
-            error_count[0] += 1
+            if matched_patterns:
+                # Find the sound for the first matched pattern
+                for pattern_dict in patterns_config:
+                    if pattern_dict.get("pattern") in matched_patterns:
+                        sound_path = pattern_dict.get("sound", "/System/Library/Sounds/Glass.aiff")
+                        unique_sounds.add(sound_path)
+                        break
 
         def do_rescan():
             self.watcher.reindex_all_files(
@@ -2068,14 +2415,14 @@ class LogWatchMenuBar(rumps.App):
             )
             self.reindexing = False
 
-            # Play up to 5 distinct sounds after scan completes
-            if self.sound_enabled and error_count[0] > 0:
-                sounds_to_play = min(error_count[0], 5)
-                for i in range(sounds_to_play):
-                    self._play_sound()
-                    if i < sounds_to_play - 1:
+            # Play each unique sound once (up to max_sounds_per_burst)
+            if self.sound_enabled and unique_sounds:
+                sounds_to_play = list(unique_sounds)[:self.max_sounds_per_burst]
+                for i, sound_path in enumerate(sounds_to_play):
+                    self._play_sound_file(sound_path)
+                    if i < len(sounds_to_play) - 1:
                         import time
-                        time.sleep(0.7)  # Pause between sounds for distinct repetition
+                        time.sleep(0.7)  # Pause between sounds for distinct playback
 
             AppHelper.callAfter(self._build_menu)
 

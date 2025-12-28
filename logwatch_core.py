@@ -42,14 +42,18 @@ def normalize_patterns(patterns):
     """Normalize a list of patterns to dict format."""
     return [normalize_pattern(p) for p in patterns]
 
-# Pattern to detect log file format (timestamp at start of line)
-LOG_LINE_PATTERN = re.compile(
+# Default pattern to detect log file format (timestamp at start of line)
+DEFAULT_LOG_LINE_PATTERN = (
     r"^\d{4}[-/]\d{2}[-/]\d{2}|"  # 2024-01-01 or 2024/01/01
     r"^\d{2}[-/]\d{2}[-/]\d{4}|"  # 01-01-2024 or 01/01/2024
     r"^\[\d{4}[-/]\d{2}[-/]\d{2}|"  # [2024-01-01
     r"^\d{2}:\d{2}:\d{2}|"  # 12:30:45
     r"^\w{3}\s+\d{1,2}\s+\d{2}:\d{2}"  # Jan 15 12:30
 )
+
+# Pattern to detect log file format (timestamp at start of line)
+# This will be updated from config
+LOG_LINE_PATTERN = re.compile(DEFAULT_LOG_LINE_PATTERN)
 
 # Patterns for extracting timestamps from log lines
 TIMESTAMP_PATTERNS = [
