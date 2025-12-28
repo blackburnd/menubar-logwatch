@@ -238,7 +238,8 @@ class MultiLogWatcher:
         self.callback = callback
         self.file_positions = {}
         self.file_error_counts = {}
-        self.file_matched_lines = {}  # {filepath: deque of (line_num, line_text, timestamp)}
+        self.file_matched_lines = {}  # {filepath: deque of (line_num, line_text, timestamp, matched_patterns)}
+        self.pattern_to_files = {}  # {pattern_str: set of filepaths that have matches}
         self.running = False
         self.observer = None
         self.watch_dirs = set()
@@ -261,6 +262,7 @@ class MultiLogWatcher:
             patterns: List of pattern dicts with 'pattern' key, or strings
         """
         self.error_patterns = []
+        self.pattern_strings = []  # Keep original pattern strings for tracking
         for p in patterns:
             # Handle both dict format and legacy string format
             if isinstance(p, dict):
@@ -273,6 +275,7 @@ class MultiLogWatcher:
                 else:
                     regex = re.compile(re.escape(pattern_str), re.IGNORECASE)
                 self.error_patterns.append(regex)
+                self.pattern_strings.append(pattern_str)
 
     def set_directories(self, directories):
         """Set directories to watch."""
@@ -303,6 +306,7 @@ class MultiLogWatcher:
         """Reset all error counts and matched lines."""
         self.file_error_counts.clear()
         self.file_matched_lines.clear()
+        self.pattern_to_files.clear()
 
     def reset_file_count(self, filepath):
         """Reset error count and matched lines for a specific file."""
@@ -310,16 +314,33 @@ class MultiLogWatcher:
             self.file_error_counts[filepath] = 0
         if filepath in self.file_matched_lines:
             self.file_matched_lines[filepath].clear()
+        # Remove this file from all pattern mappings
+        for pattern_str in list(self.pattern_to_files.keys()):
+            if filepath in self.pattern_to_files[pattern_str]:
+                self.pattern_to_files[pattern_str].discard(filepath)
+                if not self.pattern_to_files[pattern_str]:
+                    del self.pattern_to_files[pattern_str]
 
     def get_matched_lines(self, filepath):
         """Get matched lines for a specific file."""
         return list(self.file_matched_lines.get(filepath, []))
 
-    def _add_matched_line(self, filepath, line_num, line_text, line_timestamp=None):
+    def get_files_for_pattern(self, pattern_str):
+        """Get list of files that have at least one match for a specific pattern."""
+        return sorted(list(self.pattern_to_files.get(pattern_str, set())))
+
+    def _add_matched_line(self, filepath, line_num, line_text, line_timestamp=None, matched_patterns=None):
         """Add a matched line for a file."""
         if filepath not in self.file_matched_lines:
             self.file_matched_lines[filepath] = deque(maxlen=MAX_MATCHED_LINES_PER_FILE)
-        self.file_matched_lines[filepath].append((line_num, line_text.strip(), line_timestamp))
+        matched_patterns = matched_patterns or []
+        self.file_matched_lines[filepath].append((line_num, line_text.strip(), line_timestamp, matched_patterns))
+
+        # Update pattern_to_files mapping
+        for pattern_str in matched_patterns:
+            if pattern_str not in self.pattern_to_files:
+                self.pattern_to_files[pattern_str] = set()
+            self.pattern_to_files[pattern_str].add(filepath)
 
     def _is_in_datetime_range(self, line_timestamp):
         """Check if a timestamp is within the configured datetime range."""
@@ -394,6 +415,9 @@ class MultiLogWatcher:
         # Always clear and rebuild matched lines from the entire file
         if file_key in self.file_matched_lines:
             self.file_matched_lines[file_key].clear()
+        # Remove this file from pattern mappings (will be re-added during scan)
+        for pattern_str in list(self.pattern_to_files.keys()):
+            self.pattern_to_files[pattern_str].discard(file_key)
 
         # Read entire file to collect matched lines
         total_count = 0
@@ -401,12 +425,12 @@ class MultiLogWatcher:
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 line_num = 1
                 for line in f:
-                    match_count = self._count_matches(line)
+                    match_count, matched_patterns = self._count_matches(line)
                     if match_count > 0:
                         line_timestamp = parse_log_timestamp(line)
                         if self._is_in_datetime_range(line_timestamp):
                             total_count += match_count
-                            self._add_matched_line(file_key, line_num, line, line_timestamp)
+                            self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
                     line_num += 1
         except Exception:
             return
@@ -457,18 +481,21 @@ class MultiLogWatcher:
         # Clear and rebuild matched lines
         if file_key in self.file_matched_lines:
             self.file_matched_lines[file_key].clear()
+        # Remove this file from pattern mappings (will be re-added during scan)
+        for pattern_str in list(self.pattern_to_files.keys()):
+            self.pattern_to_files[pattern_str].discard(file_key)
 
         total_count = 0
         try:
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 line_num = 1
                 for line in f:
-                    match_count = self._count_matches(line)
+                    match_count, matched_patterns = self._count_matches(line)
                     if match_count > 0:
                         line_timestamp = parse_log_timestamp(line)
                         if self._is_in_datetime_range(line_timestamp):
                             total_count += match_count
-                            self._add_matched_line(file_key, line_num, line, line_timestamp)
+                            self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
                             # Notify about each error found
                             if callback_error_found:
                                 callback_error_found(filepath, line_num, line.strip())
@@ -671,21 +698,23 @@ class MultiLogWatcher:
         # Check each new line for errors
         line_num = start_line_num
         for line in new_content.splitlines():
-            match_count = self._count_matches(line)
+            match_count, matched_patterns = self._count_matches(line)
             if match_count > 0:
                 line_timestamp = parse_log_timestamp(line)
                 if self._is_in_datetime_range(line_timestamp):
                     if file_key not in self.file_error_counts:
                         self.file_error_counts[file_key] = 0
                     self.file_error_counts[file_key] += match_count
-                    self._add_matched_line(file_key, line_num, line, line_timestamp)
-                    self.callback(path.name, filepath, line_num, line.strip())
+                    self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
+                    self.callback(path.name, filepath, line_num, line.strip(), matched_patterns)
             line_num += 1
 
     def _count_matches(self, line):
-        """Count how many patterns match a line."""
+        """Count how many patterns match a line and return matched pattern strings."""
         count = 0
-        for pattern in self.error_patterns:
+        matched_patterns = []
+        for i, pattern in enumerate(self.error_patterns):
             if pattern.search(line):
                 count += 1
-        return count
+                matched_patterns.append(self.pattern_strings[i])
+        return count, matched_patterns

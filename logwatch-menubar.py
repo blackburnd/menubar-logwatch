@@ -44,13 +44,13 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 ICON_PATH = SCRIPT_DIR / "log_icon.png"
 
 # Default patterns to match in log files
-# Each pattern is a dict with 'title' (display name) and 'pattern' (match string)
+# Each pattern is a dict with 'title' (display name), 'pattern' (match string), and 'sound' (alert sound)
 DEFAULT_ERROR_PATTERNS = [
-    {"title": "Exceptions", "pattern": "exception"},
-    {"title": "Errors", "pattern": "error"},
-    {"title": "Tracebacks", "pattern": "traceback"},
-    {"title": "Failures", "pattern": "failed"},
-    {"title": "Critical", "pattern": "critical"},
+    {"title": "Exceptions", "pattern": "exception", "sound": "/System/Library/Sounds/Glass.aiff"},
+    {"title": "Errors", "pattern": "error", "sound": "/System/Library/Sounds/Glass.aiff"},
+    {"title": "Tracebacks", "pattern": "traceback", "sound": "/System/Library/Sounds/Glass.aiff"},
+    {"title": "Failures", "pattern": "failed", "sound": "/System/Library/Sounds/Glass.aiff"},
+    {"title": "Critical", "pattern": "critical", "sound": "/System/Library/Sounds/Glass.aiff"},
 ]
 
 
@@ -58,14 +58,17 @@ def normalize_pattern(p):
     """Convert pattern to normalized dict format.
 
     Handles migration from old string format to new dict format.
+    Ensures sound field is present with Glass.aiff as default.
     """
     if isinstance(p, str):
-        return {"title": p.capitalize(), "pattern": p}
+        return {"title": p.capitalize(), "pattern": p, "sound": "/System/Library/Sounds/Glass.aiff"}
     if isinstance(p, dict) and "pattern" in p:
         if "title" not in p:
             p["title"] = p["pattern"].capitalize()
+        if "sound" not in p:
+            p["sound"] = "/System/Library/Sounds/Glass.aiff"
         return p
-    return {"title": str(p), "pattern": str(p)}
+    return {"title": str(p), "pattern": str(p), "sound": "/System/Library/Sounds/Glass.aiff"}
 
 
 def normalize_patterns(patterns):
@@ -75,6 +78,20 @@ def normalize_patterns(patterns):
 # Default editor configurations: {editor_id: {name, command_template, enabled}}
 # command_template uses {file} and {line} placeholders
 DEFAULT_EDITORS = {
+    "emacs": {
+        "name": "Emacs",
+        "command": "emacs -nw +{line} \"{file}\"",
+        "enabled": True,
+        "supports_line": True,
+        "use_terminal": True,
+    },
+    "vi": {
+        "name": "vi",
+        "command": "vi +{line} \"{file}\"",
+        "enabled": True,
+        "supports_line": True,
+        "use_terminal": True,
+    },
     "console": {
         "name": "Console",
         "command": "open -a Console {file}",
@@ -87,36 +104,11 @@ DEFAULT_EDITORS = {
         "enabled": True,
         "supports_line": True,
     },
-    "sublime": {
-        "name": "Sublime Text",
-        "command": "subl {file}:{line}",
-        "enabled": True,
-        "supports_line": True,
-    },
     "bbedit": {
         "name": "BBEdit",
         "command": "bbedit +{line} {file}",
         "enabled": True,
         "supports_line": True,
-    },
-    "emacs": {
-        "name": "Emacs",
-        "command": "emacsclient -n +{line} {file}",
-        "enabled": True,
-        "supports_line": True,
-    },
-    "textmate": {
-        "name": "TextMate",
-        "command": "mate -l {line} {file}",
-        "enabled": True,
-        "supports_line": True,
-    },
-    "vim": {
-        "name": "Vim (Terminal)",
-        "command": "vim +{line} {file}",
-        "enabled": True,
-        "supports_line": True,
-        "use_terminal": True,
     },
 }
 
@@ -309,11 +301,11 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     alert.addButtonWithTitle_("OK")
     alert.addButtonWithTitle_("Cancel")
 
-    # Create container view (taller to accommodate title field and file selector)
-    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 250))
+    # Create container view (taller to accommodate title, pattern, sound selector and file selector)
+    container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 450, 280))
 
     # Title label
-    title_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 222, 50, 20))
+    title_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 252, 50, 20))
     title_label.setStringValue_("Title:")
     title_label.setBezeled_(False)
     title_label.setDrawsBackground_(False)
@@ -323,14 +315,14 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     container.addSubview_(title_label)
 
     # Title input field
-    title_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 220, 400, 24))
+    title_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 250, 400, 24))
     title_field.setStringValue_(initial_pattern.get("title", ""))
     title_field.setFont_(NSFont.systemFontOfSize_(12))
     title_field.setPlaceholderString_("e.g., Database Errors, Auth Failures")
     container.addSubview_(title_field)
 
     # Pattern label
-    pattern_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 192, 50, 20))
+    pattern_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 222, 50, 20))
     pattern_label.setStringValue_("Pattern:")
     pattern_label.setBezeled_(False)
     pattern_label.setDrawsBackground_(False)
@@ -340,11 +332,68 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     container.addSubview_(pattern_label)
 
     # Pattern input field (single line)
-    pattern_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 190, 400, 24))
+    pattern_field = NSTextField.alloc().initWithFrame_(NSMakeRect(50, 220, 400, 24))
     pattern_field.setStringValue_(initial_pattern.get("pattern", ""))
     pattern_field.setFont_(NSFont.systemFontOfSize_(12))
     pattern_field.setPlaceholderString_("e.g., error, ^WARN.*, failed")
     container.addSubview_(pattern_field)
+
+    # Sound label
+    sound_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 192, 50, 20))
+    sound_label.setStringValue_("Sound:")
+    sound_label.setBezeled_(False)
+    sound_label.setDrawsBackground_(False)
+    sound_label.setEditable_(False)
+    sound_label.setSelectable_(False)
+    sound_label.setFont_(NSFont.systemFontOfSize_(11))
+    container.addSubview_(sound_label)
+
+    # Sound selector popup
+    sound_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(50, 190, 300, 24))
+
+    # Get system sounds
+    system_sounds_dir = Path("/System/Library/Sounds")
+    sounds_list = []
+    if system_sounds_dir.exists():
+        for sound_file in sorted(system_sounds_dir.glob("*.aiff")):
+            sounds_list.append((sound_file.stem, str(sound_file)))
+
+    # Add sounds to popup and select current
+    current_sound = initial_pattern.get("sound", "/System/Library/Sounds/Glass.aiff")
+    selected_index = 0
+    for i, (sound_name, sound_path) in enumerate(sounds_list):
+        sound_popup.addItemWithTitle_(sound_name)
+        sound_popup.lastItem().setRepresentedObject_(sound_path)
+        if sound_path == current_sound:
+            selected_index = i
+
+    if sounds_list:
+        sound_popup.selectItemAtIndex_(selected_index)
+
+    container.addSubview_(sound_popup)
+
+    # Preview sound button
+    def preview_sound_action(sender):
+        selected_item = sound_popup.selectedItem()
+        if selected_item:
+            sound_path = selected_item.representedObject()
+            try:
+                subprocess.Popen(
+                    ["afplay", sound_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    preview_button = NSButton.alloc().initWithFrame_(NSMakeRect(360, 190, 90, 24))
+    preview_button.setTitle_("Preview")
+    preview_button.setBezelStyle_(1)  # Rounded button
+    preview_button.setTarget_(preview_button)
+    preview_button.setAction_("performClick:")
+    # Store the callback
+    preview_button.preview_callback = preview_sound_action
+    container.addSubview_(preview_button)
 
     # File selector row
     file_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 162, 80, 20))
@@ -541,11 +590,15 @@ def show_pattern_editor(dialog_title, initial_pattern=None, indexed_files=None):
     if response == 1000:  # OK
         pattern_str = pattern_field.stringValue().strip()
         title_str = title_field.stringValue().strip()
+        # Get selected sound
+        selected_sound_item = sound_popup.selectedItem()
+        sound_path = selected_sound_item.representedObject() if selected_sound_item else "/System/Library/Sounds/Glass.aiff"
+
         if pattern_str:  # Pattern is required, title is optional
             # If no title provided, use the pattern as title
             if not title_str:
                 title_str = pattern_str.capitalize()
-            return {"title": title_str, "pattern": pattern_str}
+            return {"title": title_str, "pattern": pattern_str, "sound": sound_path}
     return None
 
 
@@ -727,7 +780,8 @@ class MultiLogWatcher:
         self.callback = callback
         self.file_positions = {}
         self.file_error_counts = {}
-        self.file_matched_lines = {}  # {filepath: deque of (line_num, line_text, timestamp)}
+        self.file_matched_lines = {}  # {filepath: deque of (line_num, line_text, timestamp, matched_patterns)}
+        self.pattern_to_files = {}  # {pattern_str: set of filepaths that have matches}
         self.running = False
         self.observer = None
         self.watch_dirs = set()
@@ -750,6 +804,7 @@ class MultiLogWatcher:
             patterns: List of pattern dicts with 'pattern' key, or strings
         """
         self.error_patterns = []
+        self.pattern_strings = []  # Keep original pattern strings for tracking
         for p in patterns:
             # Handle both dict format and legacy string format
             if isinstance(p, dict):
@@ -762,6 +817,7 @@ class MultiLogWatcher:
                 else:
                     regex = re.compile(re.escape(pattern_str), re.IGNORECASE)
                 self.error_patterns.append(regex)
+                self.pattern_strings.append(pattern_str)
 
     def set_directories(self, directories):
         """Set directories to watch."""
@@ -792,6 +848,7 @@ class MultiLogWatcher:
         """Reset all error counts and matched lines."""
         self.file_error_counts.clear()
         self.file_matched_lines.clear()
+        self.pattern_to_files.clear()
 
     def reset_file_count(self, filepath):
         """Reset error count and matched lines for a specific file."""
@@ -799,16 +856,33 @@ class MultiLogWatcher:
             self.file_error_counts[filepath] = 0
         if filepath in self.file_matched_lines:
             self.file_matched_lines[filepath].clear()
+        # Remove this file from all pattern mappings
+        for pattern_str in list(self.pattern_to_files.keys()):
+            if filepath in self.pattern_to_files[pattern_str]:
+                self.pattern_to_files[pattern_str].discard(filepath)
+                if not self.pattern_to_files[pattern_str]:
+                    del self.pattern_to_files[pattern_str]
 
     def get_matched_lines(self, filepath):
         """Get matched lines for a specific file."""
         return list(self.file_matched_lines.get(filepath, []))
 
-    def _add_matched_line(self, filepath, line_num, line_text, line_timestamp=None):
+    def get_files_for_pattern(self, pattern_str):
+        """Get list of files that have at least one match for a specific pattern."""
+        return sorted(list(self.pattern_to_files.get(pattern_str, set())))
+
+    def _add_matched_line(self, filepath, line_num, line_text, line_timestamp=None, matched_patterns=None):
         """Add a matched line for a file."""
         if filepath not in self.file_matched_lines:
             self.file_matched_lines[filepath] = deque(maxlen=MAX_MATCHED_LINES_PER_FILE)
-        self.file_matched_lines[filepath].append((line_num, line_text.strip(), line_timestamp))
+        matched_patterns = matched_patterns or []
+        self.file_matched_lines[filepath].append((line_num, line_text.strip(), line_timestamp, matched_patterns))
+
+        # Update pattern_to_files mapping
+        for pattern_str in matched_patterns:
+            if pattern_str not in self.pattern_to_files:
+                self.pattern_to_files[pattern_str] = set()
+            self.pattern_to_files[pattern_str].add(filepath)
 
     def _is_in_datetime_range(self, line_timestamp):
         """Check if a timestamp is within the configured datetime range."""
@@ -883,6 +957,9 @@ class MultiLogWatcher:
         # Always clear and rebuild matched lines from the entire file
         if file_key in self.file_matched_lines:
             self.file_matched_lines[file_key].clear()
+        # Remove this file from pattern mappings (will be re-added during scan)
+        for pattern_str in list(self.pattern_to_files.keys()):
+            self.pattern_to_files[pattern_str].discard(file_key)
 
         # Read entire file to collect matched lines
         total_count = 0
@@ -890,12 +967,12 @@ class MultiLogWatcher:
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 line_num = 1
                 for line in f:
-                    match_count = self._count_matches(line)
+                    match_count, matched_patterns = self._count_matches(line)
                     if match_count > 0:
                         line_timestamp = parse_log_timestamp(line)
                         if self._is_in_datetime_range(line_timestamp):
                             total_count += match_count
-                            self._add_matched_line(file_key, line_num, line, line_timestamp)
+                            self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
                     line_num += 1
         except Exception:
             return
@@ -946,18 +1023,21 @@ class MultiLogWatcher:
         # Clear and rebuild matched lines
         if file_key in self.file_matched_lines:
             self.file_matched_lines[file_key].clear()
+        # Remove this file from pattern mappings (will be re-added during scan)
+        for pattern_str in list(self.pattern_to_files.keys()):
+            self.pattern_to_files[pattern_str].discard(file_key)
 
         total_count = 0
         try:
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 line_num = 1
                 for line in f:
-                    match_count = self._count_matches(line)
+                    match_count, matched_patterns = self._count_matches(line)
                     if match_count > 0:
                         line_timestamp = parse_log_timestamp(line)
                         if self._is_in_datetime_range(line_timestamp):
                             total_count += match_count
-                            self._add_matched_line(file_key, line_num, line, line_timestamp)
+                            self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
                             # Notify about each error found
                             if callback_error_found:
                                 callback_error_found(filepath, line_num, line.strip())
@@ -1093,6 +1173,9 @@ class MultiLogWatcher:
             last_position = 0
             if file_key in self.file_matched_lines:
                 self.file_matched_lines[file_key].clear()
+            # Remove this file from pattern mappings
+            for pattern_str in list(self.pattern_to_files.keys()):
+                self.pattern_to_files[pattern_str].discard(file_key)
 
         if current_size == last_position:
             return
@@ -1119,24 +1202,26 @@ class MultiLogWatcher:
         # Check each new line for errors
         line_num = start_line_num
         for line in new_content.splitlines():
-            match_count = self._count_matches(line)
+            match_count, matched_patterns = self._count_matches(line)
             if match_count > 0:
                 line_timestamp = parse_log_timestamp(line)
                 if self._is_in_datetime_range(line_timestamp):
                     if file_key not in self.file_error_counts:
                         self.file_error_counts[file_key] = 0
                     self.file_error_counts[file_key] += match_count
-                    self._add_matched_line(file_key, line_num, line, line_timestamp)
-                    self.callback(path.name, filepath, line_num, line.strip())
+                    self._add_matched_line(file_key, line_num, line, line_timestamp, matched_patterns)
+                    self.callback(path.name, filepath, line_num, line.strip(), matched_patterns)
             line_num += 1
 
     def _count_matches(self, line):
-        """Count how many patterns match a line."""
+        """Count how many patterns match a line and return matched pattern strings."""
         count = 0
-        for pattern in self.error_patterns:
+        matched_patterns = []
+        for i, pattern in enumerate(self.error_patterns):
             if pattern.search(line):
                 count += 1
-        return count
+                matched_patterns.append(self.pattern_strings[i])
+        return count, matched_patterns
 
 
 class LogWatchMenuBar(rumps.App):
@@ -1417,12 +1502,15 @@ class LogWatchMenuBar(rumps.App):
                         tooltip="Lines matching patterns - opens editor submenu"
                     )
                     for match_tuple in matched_lines[-20:]:  # Show last 20
+                        # Handle both old (3-element) and new (4-element) tuple formats
                         line_num, line_text = match_tuple[0], match_tuple[1]
+                        matched_patterns = match_tuple[3] if len(match_tuple) > 3 else []
                         display_text = line_text[:50] + "..." if len(line_text) > 50 else line_text
                         # Create submenu for each match with editor options
+                        patterns_info = f" | Patterns: {', '.join(matched_patterns)}" if matched_patterns else ""
                         match_item = self._menu_item(
                             f"L{line_num}: {display_text}",
-                            tooltip=f"Line {line_num} - choose editor to open"
+                            tooltip=f"Line {line_num}{patterns_info} - choose editor to open"
                         )
                         # Add enabled editors only
                         for editor_id, config in editors.items():
@@ -1494,11 +1582,55 @@ class LogWatchMenuBar(rumps.App):
             # Create submenu for each pattern with Edit and Remove options
             title = pattern_dict.get("title", "")
             pattern_str = pattern_dict.get("pattern", "")
+            sound_path = pattern_dict.get("sound", "/System/Library/Sounds/Glass.aiff")
+            sound_name = Path(sound_path).stem if sound_path else "Glass"
             display_title = title[:25] + "..." if len(title) > 25 else title
+
+            # Get files that match this pattern
+            matched_files = []
+            if self.watcher:
+                matched_files = self.watcher.get_files_for_pattern(pattern_str)
+
+            # Show count of files with matches in the pattern title
+            pattern_title = f"{display_title} [{len(matched_files)}]" if matched_files else display_title
             pattern_submenu = self._menu_item(
-                display_title,
-                tooltip=f"Pattern: {pattern_str}"
+                pattern_title,
+                tooltip=f"Pattern: {pattern_str} | Sound: {sound_name} | Files with matches: {len(matched_files)}"
             )
+
+            # Add files submenu if there are matched files
+            if matched_files:
+                files_submenu = self._menu_item(
+                    f"Files with Matches ({len(matched_files)})",
+                    tooltip="Files that have at least one match for this pattern"
+                )
+                for filepath in matched_files[:20]:  # Limit to 20 files
+                    filename = Path(filepath).name
+                    files_submenu.add(self._menu_item(
+                        filename,
+                        tooltip=filepath
+                    ))
+                if len(matched_files) > 20:
+                    files_submenu.add(self._menu_item(f"...and {len(matched_files) - 20} more"))
+                pattern_submenu.add(files_submenu)
+                pattern_submenu.add(rumps.separator)
+
+            # Add sound info and test option
+            sound_info_item = self._menu_item(
+                f"Sound: {sound_name}",
+                tooltip=f"Alert sound: {sound_path}"
+            )
+            pattern_submenu.add(sound_info_item)
+
+            test_sound_item = self._menu_item(
+                "Test Sound",
+                tooltip=f"Play the alert sound for this pattern"
+            )
+            if not self.reindexing:
+                test_sound_item.set_callback(lambda _, sp=sound_path: self._play_sound_file(sp))
+            pattern_submenu.add(test_sound_item)
+            pattern_submenu.add(rumps.separator)
+
             edit_item = self._menu_item(
                 "Edit",
                 tooltip=f"Modify this pattern"
@@ -1708,7 +1840,7 @@ class LogWatchMenuBar(rumps.App):
         else:
             self.title = "Logwatch?"
 
-    def _on_error_detected(self, filename, filepath, line_num, message):
+    def _on_error_detected(self, filename, filepath, line_num, message, matched_patterns=None):
         """Called when an error is detected (from background thread)."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.recent_errors.appendleft((timestamp, filename, filepath, line_num, message))
@@ -1721,7 +1853,21 @@ class LogWatchMenuBar(rumps.App):
                 self.sound_count = 0
 
             if self.sound_count < self.max_sounds_per_burst:
-                self._play_sound()
+                # Get the sound for the first matched pattern
+                sound_to_play = None
+                if matched_patterns:
+                    # Find the pattern config for the first matched pattern
+                    patterns = normalize_patterns(self.config.get("error_patterns", DEFAULT_ERROR_PATTERNS))
+                    for pattern_dict in patterns:
+                        if pattern_dict.get("pattern") == matched_patterns[0]:
+                            sound_to_play = pattern_dict.get("sound", "/System/Library/Sounds/Glass.aiff")
+                            break
+
+                if sound_to_play:
+                    self._play_sound_file(sound_to_play)
+                else:
+                    self._play_sound()  # Fallback to default sound
+
                 self.sound_count += 1
                 # Reset counter 2 seconds after first sound in burst
                 if self.sound_count == 1:
@@ -2185,15 +2331,22 @@ class LogWatchMenuBar(rumps.App):
 
         # Build command from template
         command_template = editor_config.get("command", "")
-        command_str = command_template.replace("{file}", f'"{filepath}"').replace("{line}", str(line_num))
 
         try:
             if editor_config.get("use_terminal"):
                 # Run in Terminal using AppleScript
-                script = f'tell application "Terminal" to do script "{command_str}"'
-                subprocess.run(["osascript", "-e", script], check=False)
+                # Build the command with proper escaping for bash
+                command_str = command_template.replace("{file}", filepath).replace("{line}", str(line_num))
+                # Escape for AppleScript string - backslash and quote
+                escaped_command = command_str.replace("\\", "\\\\").replace('"', '\\"')
+                script = f'tell application "Terminal" to do script "{escaped_command}"'
+                # Run without timeout since Terminal command returns immediately
+                result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+                if result.returncode != 0:
+                    self._show_alert("Error", f"AppleScript failed:\n{result.stderr}\n\nScript:\n{script}\n\nCommand: {command_str}")
             else:
                 # Run command directly via shell
+                command_str = command_template.replace("{file}", f'"{filepath}"').replace("{line}", str(line_num))
                 result = subprocess.run(command_str, shell=True, capture_output=True, timeout=5)
                 if result.returncode != 0:
                     self._show_alert(

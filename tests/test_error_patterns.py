@@ -38,55 +38,85 @@ class TestErrorPatternMatching:
     def test_count_matches_single_pattern(self, watcher):
         """Test counting matches with single pattern."""
         watcher.set_error_patterns(["error"])
-        assert watcher._count_matches("ERROR: Something went wrong") == 1
-        assert watcher._count_matches("No problems here") == 0
+        count, patterns = watcher._count_matches("ERROR: Something went wrong")
+        assert count == 1
+        count, patterns = watcher._count_matches("No problems here")
+        assert count == 0
 
     def test_count_matches_multiple_patterns(self, watcher):
         """Test counting with multiple patterns matching."""
         watcher.set_error_patterns(["error", "failed"])
         # Both patterns match
         line = "ERROR: Connection failed to server"
-        assert watcher._count_matches(line) == 2
+        count, patterns = watcher._count_matches(line)
+
+        assert count == 2
 
     def test_case_insensitive_matching(self, watcher):
         """Test that matching is case insensitive."""
         watcher.set_error_patterns(["error"])
-        assert watcher._count_matches("ERROR: uppercase") == 1
-        assert watcher._count_matches("error: lowercase") == 1
-        assert watcher._count_matches("Error: mixed case") == 1
-        assert watcher._count_matches("eRrOr: weird case") == 1
+        count, patterns = watcher._count_matches("ERROR: uppercase")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("error: lowercase")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("Error: mixed case")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("eRrOr: weird case")
+
+        assert count == 1
 
     def test_regex_pattern(self, watcher):
         """Test regex patterns (starting with ^)."""
         watcher.set_error_patterns(["^ERROR.*timeout"])
-        assert watcher._count_matches("ERROR: Connection timeout") == 1
-        assert watcher._count_matches("ERROR: timeout occurred") == 1
-        assert watcher._count_matches("WARNING: Connection timeout") == 0
+        count, patterns = watcher._count_matches("ERROR: Connection timeout")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("ERROR: timeout occurred")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("WARNING: Connection timeout")
+
+        assert count == 0
 
     def test_escaped_special_chars(self, watcher):
         """Test that special regex chars are escaped for literal patterns."""
         watcher.set_error_patterns(["[ERROR]"])
         # Should match literal [ERROR] not regex character class
-        assert watcher._count_matches("[ERROR] Something happened") == 1
-        assert watcher._count_matches("ERROR Something happened") == 0
+        count, patterns = watcher._count_matches("[ERROR] Something happened")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("ERROR Something happened")
+
+        assert count == 0
 
     def test_empty_pattern_list(self, watcher):
         """Test with empty pattern list."""
         watcher.set_error_patterns([])
-        assert watcher._count_matches("ERROR: This should not match") == 0
+        count, patterns = watcher._count_matches("ERROR: This should not match")
+
+        assert count == 0
 
     def test_pattern_in_middle_of_line(self, watcher):
         """Test pattern matching in middle of line."""
         watcher.set_error_patterns(["error"])
-        assert watcher._count_matches("2024-01-15 ERROR: message") == 1
-        assert watcher._count_matches("This error occurred") == 1
+        count, patterns = watcher._count_matches("2024-01-15 ERROR: message")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("This error occurred")
+
+        assert count == 1
 
     def test_multiple_occurrences_same_pattern(self, watcher):
         """Test that multiple occurrences of same pattern count as 1."""
         watcher.set_error_patterns(["error"])
         # Pattern matches once per pattern, not per occurrence
         line = "error error error"
-        assert watcher._count_matches(line) == 1
+        count, patterns = watcher._count_matches(line)
+
+        assert count == 1
 
     def test_common_error_patterns(self, watcher):
         """Test matching common error patterns."""
@@ -102,7 +132,7 @@ class TestErrorPatternMatching:
         ]
 
         for line, should_match in test_cases:
-            count = watcher._count_matches(line)
+            count, patterns = watcher._count_matches(line)
             if should_match:
                 assert count > 0, f"Expected match for: {line}"
             else:
@@ -135,8 +165,12 @@ class TestPatternSetting:
         watcher.set_error_patterns(["^ERROR\\s+\\d+"])
 
         # Should match regex pattern
-        assert watcher._count_matches("ERROR 123 message") == 1
-        assert watcher._count_matches("WARNING 123 message") == 0
+        count, patterns = watcher._count_matches("ERROR 123 message")
+
+        assert count == 1
+        count, patterns = watcher._count_matches("WARNING 123 message")
+
+        assert count == 0
 
 
 class TestDatetimeFiltering:
