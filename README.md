@@ -1,5 +1,5 @@
 # menubar-logwatch
-
+![Demo of menubar-logwatch open](./docs/open.gif)
 I use this to keep me notified in real time of processes that may be building or being built. 
 I first select a directory to scan, the scan will search for file considered as "log files"
 as well as find similar exception types, processes actively using each file. 
