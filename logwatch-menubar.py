@@ -6,6 +6,9 @@ Watches configured log directories for match patterns and plays a sound alert
 when matches are detected. Displays recent matches in the menubar dropdown.
 """
 
+__version__ = "1.0.0"
+__author__ = "Daniel Blackburn"
+
 import os
 import re
 import sys
@@ -1527,6 +1530,7 @@ class LogWatchMenuBar(rumps.App):
         self.sounds_played_in_burst = set()  # Track unique sounds played in current burst
         self.sound_reset_time = None  # Time to reset sound tracking
         self.max_sounds_per_burst = 5  # Maximum unique sounds to play in quick succession
+        self.keep_menu_open = False  # Toggle to keep menu open for live updates
 
         self._build_menu()
         self._start_watcher()
@@ -1600,85 +1604,52 @@ class LogWatchMenuBar(rumps.App):
             json.dump(self.index, f, indent=2)
 
     def _menu_item(self, title, callback=None, tooltip=None):
-        """Create a menu item with optional tooltip."""
+        """Create a menu item with optional tooltip.
+
+        Note: Tooltips are disabled for menu items to prevent them from
+        overlapping with the menu. Use descriptive menu item text instead.
+        """
         item = rumps.MenuItem(title, callback=callback)
-        if tooltip:
-            item._menuitem.setToolTip_(tooltip)
+        # Tooltips disabled - they overlap with menus on macOS
+        # if tooltip:
+        #     item._menuitem.setToolTip_(tooltip)
         return item
 
     def _build_menu(self):
         """Build the dropdown menu."""
         self.menu.clear()
 
-        # PID and thread information for manual process management
-        active_threads = threading.active_count()
-        thread_info = [
-            f"Main PID: {self.pid}",
-        ]
-
-        # Add observer thread info if running
-        if self.watcher and self.watcher.running and self.watcher.observer:
-            observer_thread = None
-            for thread in threading.enumerate():
-                if 'observer' in thread.name.lower() or 'watchdog' in thread.name.lower():
-                    observer_thread = thread
-                    break
-            if observer_thread and observer_thread.is_alive():
-                thread_info.append(f"Observer: Active (TID: {observer_thread.ident})")
-
-        # Add scanner thread info if running
-        if self.scanner and self.scanner.running:
-            scanner_thread = self.scanner.thread
-            if scanner_thread and scanner_thread.is_alive():
-                thread_info.append(f"Scanner: Active (TID: {scanner_thread.ident})")
-
-        # Display process info
-        self.menu.add(self._menu_item(
-            f"Process Info ({active_threads} threads)",
-            tooltip="Process and thread information"
-        ))
-        for info in thread_info:
-            self.menu.add(self._menu_item(
-                f"  {info}",
-                tooltip="Use 'kill {0}' in terminal to stop main process".format(self.pid)
-            ))
+        # === KEEP OPEN TOGGLE ===
+        keep_open_item = rumps.MenuItem(
+            "✓ Keep Open" if self.keep_menu_open else "Keep Open",
+            callback=self._toggle_keep_open
+        )
+        self.menu.add(keep_open_item)
         self.menu.add(rumps.separator)
 
-        # Status section
-        directories = self.config.get("directories", [])
-        indexed_files = self.index.get("files", {})
-
-        if directories or indexed_files:
-            self.menu.add(self._menu_item(
-                "Watching:",
-                tooltip="Directories and files being monitored for matches"
-            ))
-            for d in directories:
-                self.menu.add(self._menu_item(
-                    f"  [DIR] {d}",
-                    tooltip="All .log files in this directory are watched"
-                ))
-            if indexed_files:
-                self.menu.add(self._menu_item(
-                    f"  [IDX] {len(indexed_files)} indexed files",
-                    tooltip="Individual log files added via scan"
-                ))
-        else:
-            self.menu.add(self._menu_item(
-                "No log sources configured",
-                tooltip="Add directories or scan for log files to start monitoring"
-            ))
-
-        self.menu.add(rumps.separator)
-
-        # Match count section
+        # === STATUS SECTION ===
+        # Match count (prominently at top)
         total_matches = 0
         if self.watcher:
             total_matches = self.watcher.get_total_error_count()
-        self.menu.add(self._menu_item(
-            f"Total Matches: {total_matches}",
-            tooltip="Total pattern matches found across all watched files"
-        ))
+        self.menu.add(self._menu_item(f"Total Matches: {total_matches}"))
+
+        # Watching status
+        directories = self.config.get("directories", [])
+        indexed_files = self.index.get("files", {})
+
+        watching_items = []
+        if directories:
+            watching_items.append(f"{len(directories)} director{'y' if len(directories) == 1 else 'ies'}")
+        if indexed_files:
+            watching_items.append(f"{len(indexed_files)} files")
+
+        if watching_items:
+            self.menu.add(self._menu_item(f"Watching: {', '.join(watching_items)}"))
+        else:
+            self.menu.add(self._menu_item("Not monitoring any files"))
+
+        self.menu.add(rumps.separator)
 
         # Recent matches section with datetime range
         # Show the start_datetime filter to qualify what "Recent" means
@@ -1742,33 +1713,6 @@ class LogWatchMenuBar(rumps.App):
                     tooltip=f"Stop watching {d}"
                 ))
         self.menu.add(dir_menu)
-
-        # Scan for log files
-        scan_menu = self._menu_item(
-            "Scan for Logs",
-            tooltip="Find and index log files in a directory"
-        )
-        if self.scanning:
-            progress_pct = self.scan_progress * 100
-            scan_menu.add(self._menu_item(f"Scanning: {progress_pct:.1f}%"))
-            scan_menu.add(self._menu_item(
-                "Stop Scan",
-                callback=self._stop_scan,
-                tooltip="Cancel the current scan"
-            ))
-        else:
-            scan_menu.add(self._menu_item(
-                "Scan Directory...",
-                callback=self._start_scan,
-                tooltip="Recursively find log files and add them to index"
-            ))
-            if indexed_files:
-                scan_menu.add(self._menu_item(
-                    f"Clear Index ({len(indexed_files)} files)",
-                    callback=self._clear_index,
-                    tooltip="Remove all indexed files from monitoring"
-                ))
-        self.menu.add(scan_menu)
 
         # Indexed files submenu with match counts
         if indexed_files:
@@ -2014,27 +1958,7 @@ class LogWatchMenuBar(rumps.App):
 
         self.menu.add(rumps.separator)
 
-        # Actions
-        if self.reindexing:
-            progress_pct = self.reindex_progress * 100
-            self.menu.add(self._menu_item(f"Re-scanning: {progress_pct:.0f}%"))
-        else:
-            self.menu.add(self._menu_item(
-                "Re-scan Files (with sound)",
-                callback=self._rescan_with_sound,
-                tooltip="Re-read all files and play sound for each match found"
-            ))
-        self.menu.add(self._menu_item(
-            "Reset Counter",
-            callback=self._reset_counter,
-            tooltip="Reset all match counts to zero"
-        ))
-        self.menu.add(self._menu_item(
-            "Clear Recent Matches",
-            callback=self._clear_errors,
-            tooltip="Clear the recent matches list"
-        ))
-
+        # === SETTINGS SECTION ===
         # Sound submenu
         sound_menu = self._menu_item(
             "Sound",
@@ -2109,15 +2033,74 @@ class LogWatchMenuBar(rumps.App):
         self.menu.add(editors_menu)
 
         self.menu.add(rumps.separator)
+
+        # === ACTIONS SECTION ===
+        actions_menu = self._menu_item("Actions")
+
+        # Re-scan action
+        if self.reindexing:
+            progress_pct = self.reindex_progress * 100
+            actions_menu.add(self._menu_item(f"Re-scanning: {progress_pct:.0f}%"))
+        else:
+            actions_menu.add(self._menu_item(
+                "Re-scan All Files",
+                callback=self._rescan_with_sound
+            ))
+
+        actions_menu.add(rumps.separator)
+        actions_menu.add(self._menu_item(
+            "Reset Counter",
+            callback=self._reset_counter
+        ))
+        actions_menu.add(self._menu_item(
+            "Clear Recent Matches",
+            callback=self._clear_errors
+        ))
+
+        self.menu.add(actions_menu)
+
+        # === ADVANCED SECTION ===
+        advanced_menu = self._menu_item("Advanced")
+
+        # Process info
+        active_threads = threading.active_count()
+        advanced_menu.add(self._menu_item(f"Process ID: {self.pid}"))
+        advanced_menu.add(self._menu_item(f"Threads: {active_threads}"))
+
+        advanced_menu.add(rumps.separator)
+
+        # Config files
+        config_dir = str(CONFIG_PATH.parent)
+        advanced_menu.add(self._menu_item(
+            "Open Config Folder",
+            callback=lambda _: self._reveal_in_finder(str(CONFIG_PATH))
+        ))
+        advanced_menu.add(self._menu_item(
+            "Edit config.json",
+            callback=lambda _: self._open_file(str(CONFIG_PATH))
+        ))
+        advanced_menu.add(self._menu_item(
+            "Edit log_index.json",
+            callback=lambda _: self._open_file(str(INDEX_PATH))
+        ))
+
+        self.menu.add(advanced_menu)
+
+        self.menu.add(rumps.separator)
+
+        # === BOTTOM SECTION ===
+        self.menu.add(self._menu_item(
+            "About Logwatch",
+            callback=self._show_about
+        ))
+        self.menu.add(rumps.separator)
         self.menu.add(self._menu_item(
             "Restart",
-            callback=self._restart,
-            tooltip="Restart the application"
+            callback=self._restart
         ))
         self.menu.add(self._menu_item(
             "Quit",
-            callback=self._quit,
-            tooltip="Stop monitoring and exit"
+            callback=self._quit
         ))
 
     def _start_watcher(self, reindex=True):
@@ -2444,6 +2427,43 @@ class LogWatchMenuBar(rumps.App):
 
         thread = threading.Thread(target=do_rescan, daemon=True)
         thread.start()
+
+    def _toggle_keep_open(self, sender):
+        """Toggle keep menu open mode for live updates."""
+        self.keep_menu_open = not self.keep_menu_open
+        # Update the menu item text immediately
+        sender.title = "✓ Keep Open" if self.keep_menu_open else "Keep Open"
+
+        if self.keep_menu_open:
+            # Start auto-refresh timer when enabled
+            self._start_menu_refresh_timer()
+        else:
+            # Stop auto-refresh timer when disabled
+            self._stop_menu_refresh_timer()
+
+    def _start_menu_refresh_timer(self):
+        """Start a timer to refresh the menu for live updates."""
+        if hasattr(self, '_menu_refresh_timer') and self._menu_refresh_timer:
+            return  # Already running
+
+        def refresh_loop():
+            while self.keep_menu_open:
+                import time
+                time.sleep(1)  # Refresh every second
+                # Schedule menu rebuild on main thread
+                try:
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(self._build_menu)
+                except Exception:
+                    pass
+
+        self._menu_refresh_timer = threading.Thread(target=refresh_loop, daemon=True)
+        self._menu_refresh_timer.start()
+
+    def _stop_menu_refresh_timer(self):
+        """Stop the menu refresh timer."""
+        if hasattr(self, '_menu_refresh_timer'):
+            self._menu_refresh_timer = None
 
     def _toggle_sound(self, _):
         """Toggle sound alerts."""
@@ -3025,6 +3045,41 @@ class LogWatchMenuBar(rumps.App):
         alert.addButtonWithTitle_("OK")
         alert.window().setLevel_(3)
         alert.runModal()
+
+    def _show_about(self, _):
+        """Show About dialog with version information."""
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Logwatch Menubar")
+
+        # Build version info
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        info_text = f"""Version {__version__}
+
+A macOS menubar application for monitoring log files.
+
+Author: {__author__}
+Python: {python_version}
+Config: {CONFIG_PATH.parent}
+
+Press OK to copy GitHub URL to clipboard"""
+
+        alert.setInformativeText_(info_text)
+        alert.addButtonWithTitle_("OK")
+        alert.addButtonWithTitle_("Cancel")
+        alert.window().setLevel_(3)
+
+        response = alert.runModal()
+        if response == 1000:  # OK - copy GitHub URL
+            github_url = "https://github.com/danielblackburn/menubar-logwatch"
+            try:
+                subprocess.run(
+                    ["pbcopy"],
+                    input=github_url.encode("utf-8"),
+                    check=False
+                )
+            except Exception:
+                pass
 
     def _copy_path(self, filepath):
         """Copy file path to clipboard."""

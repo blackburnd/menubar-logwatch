@@ -18,9 +18,10 @@ from collections import deque
 DEFAULT_ERROR_PATTERNS = [
     {"title": "Exceptions", "pattern": "exception"},
     {"title": "Errors", "pattern": "error"},
-    {"title": "Tracebacks", "pattern": "traceback"},
-    {"title": "Failures", "pattern": "failed"},
+    {"title": "Traceback", "pattern": "traceback"},
+    {"title": "Failure", "pattern": "fail"},
     {"title": "Critical", "pattern": "critical"},
+    {"title": ".pynb", "pattern": ".pynb"},
 ]
 
 
